@@ -246,20 +246,15 @@ To exactly reproduce the ACIER study results:
 3. Run the batch pipeline on the indoor or outdoor condition folders
 
 A reproducible CodeOcean capsule demonstrating end-to-end processing of the
-outdoor older adult condition is available at:
-[https://codeocean.com/capsule/9058247](https://codeocean.com/capsule/9058247)
+outdoor older adult condition is available at: [NOT AVAILABLE YET]
+
 
 ---
 
 ## Citation
 
-If you use RACING in your research, please cite:
 
-> Terrier, P. RACING: R-based Attractor Complexity INdex for Gait -- An open R
-> implementation of validated nonlinear gait analysis algorithms. *SoftwareX*,
-> [volume], [year]. https://doi.org/[DOI -- to be completed after publication]
-
-For the underlying ACIER dataset and original MATLAB algorithms, please also cite:
+For the underlying ACIER dataset and original MATLAB algorithms, please  cite:
 
 > Piergiovanni, S., & Terrier, P. (2024). Validity of linear and nonlinear measures
 > of gait variability to characterize aging gait with a single lower back accelerometer.
