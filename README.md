@@ -26,7 +26,6 @@ the international research community without requiring a MATLAB license.
 |--------|-------------|-------------------|
 | **LDS** | Local Divergence Score (short-term, 0-0.5 strides) | Gait stability, fall risk |
 | **ACI** | Attractor Complexity Index (long-term, 5-12 strides) | Motor complexity, cognitive engagement |
-| **DFA alpha** | Detrended Fluctuation Analysis exponent | Stride-to-stride variability structure |
 | **Step/Stride regularity** | ACF-based regularity indices | Gait rhythmicity |
 | **Step frequency** | FFT-based cadence detection | Walking speed proxy |
 | **RMS ratio** | Mediolateral/norm acceleration ratio | Trunk stability |
