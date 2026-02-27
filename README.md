@@ -6,7 +6,7 @@
 [![R >= 4.0](https://img.shields.io/badge/R-%3E%3D%204.0-blue.svg)](https://cran.r-project.org/)
 [![CodeOcean](https://img.shields.io/badge/CodeOcean-Reproducible%20Capsule-blue)](https://codeocean.com/capsule/9058247)
 [![Zenodo Dataset](https://img.shields.io/badge/Data-Zenodo%2010.5281%2Fzenodo.10148824-blue)](https://doi.org/10.5281/zenodo.10148824)
-[![Zenodo Code DOI](https://img.shields.io/badge/Data-Zenodo%2010.5281%2Fzenodo.10148824-blue)](https://doi.org/10.5281/zenodo.18801995)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.18801995.svg)](https://doi.org/10.5281/zenodo.18801995)
 
 ---
 
