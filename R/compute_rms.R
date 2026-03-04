@@ -9,6 +9,12 @@
 #' accelerations by total movement intensity, providing a speed-independent measure
 #' of lateral trunk control and gait quality.
 #'
+#' Note: The ACIER implementation uses a gravity-subtracted vector norm
+#' (norm = sqrt(x^2 + y^2 + z^2) - 1), which differs from Sekine et al.'s
+#' original RMSR definition (RMS_direction / sqrt(RMS_AP^2 + RMS_ML^2 + RMS_V^2)).
+#' Both produce a dimensionless lateral sway index, but values are not directly
+#' comparable to Sekine's published normative data.
+#'
 #' @param az Numeric vector: mediolateral acceleration (g), TILT-CORRECTED
 #' @param norm_signal Numeric vector: vector norm with gravity removed,
 #'        computed from RAW signals BEFORE tilt correction:
@@ -28,7 +34,7 @@
 #'   Moe-Nilssen, R. (1998). A new method for evaluating motor control in gait
 #'   under real-life environmental conditions. Part 2: Gait analysis.
 #'   Clinical Biomechanics, 13(4-5), 328-335.
-#'   https://doi.org/10.1016/S0268-0033(98)00090-4
+#'   https://doi.org/10.1016/S0268-0033(98)00091-6
 #'
 #' RMS ratio (mediolateral / vector norm):
 #'   Sekine, M., Tamura, T., Yoshida, M., Suda, Y., Kimura, Y., Miyoshi, H.,
@@ -51,6 +57,8 @@
 #' @export
 compute_rms <- function(az, norm_signal) {
   
+  # --- Input validation ---
+  
   if (!is.numeric(az) || !is.numeric(norm_signal)) {
     stop("az and norm_signal must be numeric vectors")
   }
@@ -63,15 +71,29 @@ compute_rms <- function(az, norm_signal) {
     stop("Input signals are empty")
   }
   
-  # RMS = sqrt(mean(x²))
-  rms_norm <- sqrt(mean(norm_signal^2))
-  rms_ml <- sqrt(mean(az^2))
+  # Check for NA values
+  n_na <- sum(is.na(az)) + sum(is.na(norm_signal))
+  if (n_na > 0) {
+    warning(sprintf("Input contains %d NA value(s); results will be NA", n_na))
+  }
   
-  # RMS ratio: ML / norm
-  rms_ratio <- rms_ml / rms_norm
+  # --- RMS computation ---
+  # RMS = sqrt(mean(x^2))
+  
+  rms_norm <- sqrt(mean(norm_signal^2))
+  rms_ml   <- sqrt(mean(az^2))
+  
+  # --- RMS ratio with division-by-zero protection ---
+  
+  if (is.na(rms_norm) || rms_norm < .Machine$double.eps) {
+    warning("RMS of norm signal is zero or NA; rms_ratio set to NA")
+    rms_ratio <- NA_real_
+  } else {
+    rms_ratio <- rms_ml / rms_norm
+  }
   
   return(list(
-    rms_norm = rms_norm,
+    rms_norm  = rms_norm,
     rms_ratio = rms_ratio
   ))
 }

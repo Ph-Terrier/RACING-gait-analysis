@@ -81,7 +81,7 @@ embed_time_series <- function(x, m, tau) {
 #' prevents autocorrelation effects from dominating the nearest neighbor selection.
 #' 
 #' Performance: Uses RANN package KD-tree (O(M log M)) when available,
-#' otherwise falls back to vectorized R implementation (O(M²)).
+#' otherwise falls back to vectorized R implementation (O(M^2)).
 #'
 #' @references
 #' Theiler, J. (1986). Spurious dimension from correlation algorithms applied
@@ -193,8 +193,6 @@ compute_divergence <- function(Y, nearest_pos, max_iter) {
 #' @return Integer - estimated mean period in samples
 #' @note For gait analysis, this typically returns ~150 samples (one stride)
 #'       at 256 Hz sampling frequency.
-#' @param x Numeric vector - the time series
-#' @return Integer - estimated mean period in samples
 estimate_mean_period <- function(x) {
   N <- length(x)
   max_lag <- min(N - 1, 500)

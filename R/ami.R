@@ -22,21 +22,33 @@
 #            for strange attractors from mutual information. Physical Review A.
 #
 # Typical ACIER pipeline usage: ami(signal, n_bins = 64, n_lags = 100)
+#
+# IMPORTANT - Histogram binning note (2026-03):
+# The original MATLAB code has an internal inconsistency:
+#   - prob.m  -> rhist.m -> hist(y,M): CENTER-based, bin_width = range/(M-1)
+#   - probxy.m -> computeEdge()+histc(): EDGE-based, bin_width = range/M
+# This R port deliberately replicates this inconsistency to ensure AMI values
+# match MATLAB output exactly. rhist() uses center-based (range/(M-1)) for
+# 1D marginals, while prob_2d() uses edge-based (range/M) for joint probs.
 # =============================================================================
 
 
 # -----------------------------------------------------------------------------
-# Helper: Relative histogram 
+# Helper: Relative histogram (MATLAB hist(y,M) compatible)
 # -----------------------------------------------------------------------------
-#' Compute relative frequency histogram using MATLAB-style binning
-#' 
-#' Uses LEFT-CLOSED intervals [a, b) to match MATLAB hist() behavior.
+#' Compute relative frequency histogram replicating MATLAB hist(y, M)
+#'
+#' MATLAB hist(y, M) creates M bin CENTERS via linspace(min, max, M),
+#' giving bin_width = range/(M-1). This differs from the edge-based
+#' approach (range/M) used in probxy.m for joint probabilities.
+#' We deliberately replicate this behavior for MATLAB compatibility
+#' in the 1D marginal probability calculation (prob_1d).
 #'
 #' @param y Numeric vector
 #' @param n_bins Number of bins (default 10)
 #' @return List with components:
 #'   - freq: Relative frequencies for each bin (length = n_bins)
-#'   - centers: Bin centers
+#'   - centers: Bin centers (matching MATLAB linspace output)
 #'   - n_bins: Number of bins used
 rhist <- function(y, n_bins = 10) {
   y <- as.numeric(y)
@@ -54,25 +66,27 @@ rhist <- function(y, n_bins = 10) {
     return(list(freq = freq, centers = centers, n_bins = n_bins))
   }
   
-  bin_width <- (max_y - min_y) / n_bins
+  # --- MATLAB hist(y, M) CENTER-BASED binning ---
+  # Centers: linspace(min, max, M) -> bin_width = range / (M-1)
+  # NOT range/M as in edge-based approaches
+  centers <- seq(min_y, max_y, length.out = n_bins)
   
-  # Create edges: min + width * (0, 1, 2, ..., n_bins)
-  edges <- min_y + bin_width * (0:n_bins)
+  # Bin edges at midpoints between consecutive centers
+  # First bin extends from -Inf, last bin extends to +Inf
+  midpoints <- (centers[-n_bins] + centers[-1]) / 2
+  edges <- c(-Inf, midpoints, Inf)
   
-  # MATLAB-style binning: use findInterval with left-closed intervals
-  # findInterval finds i such that vec[i] <= x < vec[i+1]
-  # rightmost.closed=TRUE means the last interval includes its right boundary
-  bin_idx <- findInterval(y, edges, rightmost.closed = TRUE, all.inside = FALSE)
+  # Assign values to bins using findInterval
+  # With -Inf/Inf boundaries and rightmost.closed=TRUE,
+  # this replicates MATLAB hist nearest-center assignment
+  bin_idx <- findInterval(y, edges, rightmost.closed = TRUE)
   
-  # Ensure indices are in valid range [1, n_bins]
+  # Safety clamp (should not be needed with -Inf/Inf boundaries)
   bin_idx[bin_idx < 1] <- 1
   bin_idx[bin_idx > n_bins] <- n_bins
   
   # Count occurrences in each bin
   counts <- tabulate(bin_idx, nbins = n_bins)
-  
-  # Compute centers
-  centers <- edges[1:n_bins] + bin_width / 2
   
   list(
     freq = counts / n,
@@ -413,12 +427,13 @@ find_first_minimum <- function(ami_values) {
     }
   }
   
-  # No minimum found: return lag where AMI drops to 1/e of initial
+  # No minimum found: return 1-based position where AMI drops to 1/e of initial
+  # (consistent with main return convention = MATLAB find(diff>0)(1))
   threshold <- ami_values[1] / exp(1)
   below_threshold <- which(ami_values < threshold & !is.na(ami_values))
   
   if (length(below_threshold) > 0) {
-    return(below_threshold[1] - 1)  # 0-based lag
+    return(below_threshold[1])  # 1-based position (matches main return convention)
   }
   
   # Fallback: return NA
@@ -457,9 +472,12 @@ ami_plot <- function(lags, ami_values, corr_values) {
   # Mark first minimum
   opt_lag <- find_first_minimum(ami_values)
   if (!is.na(opt_lag)) {
-    points(opt_lag, ami_values[opt_lag + 1], pch = 19, col = "red", cex = 1.5)
-    abline(v = opt_lag, lty = 2, col = "gray")
-    text(opt_lag, ami_values[opt_lag + 1], 
+    # opt_lag is 1-based index in ami_values (= MATLAB convention for tau)
+    # Actual lag on x-axis = opt_lag - 1 (since ami_values[1] = lag 0)
+    lag_value <- opt_lag - 1
+    points(lag_value, ami_values[opt_lag], pch = 19, col = "red", cex = 1.5)
+    abline(v = lag_value, lty = 2, col = "gray")
+    text(lag_value, ami_values[opt_lag], 
          labels = sprintf("tau = %d", opt_lag),
          pos = 4, col = "red")
   }

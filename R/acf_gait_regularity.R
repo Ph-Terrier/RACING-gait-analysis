@@ -23,6 +23,12 @@
 #     back accelerometer. Sensors, 24(23), 7427.
 #     https://doi.org/10.3390/s24237427
 #
+#   Fisher z-transform in gait analysis (recommended applying atanh):
+#     Auvinet, B., Berrut, G., Touzard, C., Moutel, L., Collet, N.,
+#     Chaleil, D., & Barrey, E. (2002). Reference data for normal subjects
+#     obtained with an accelerometric device. Gait & Posture, 16(2), 124-134.
+#     https://doi.org/10.1016/S0966-6362(01)00203-X
+#
 # ACIER Implementation Notes:
 # - Input must be the VECTOR NORM of 3D acceleration with gravity removed:
 #   norm = sqrt(ax^2 + ay^2 + az^2) - 1
@@ -197,6 +203,9 @@ xcorr_unbiased <- function(x, max_lag, normalize = TRUE) {
 #' Moe-Nilssen R, Helbostad JL (2004). Estimation of gait cycle characteristics
 #' by trunk accelerometry. J Biomech, 37(1):121-6.
 #'
+#' Auvinet B, Berrut G, Touzard C, et al. (2002). Reference data for normal
+#' subjects obtained with an accelerometric device. Gait Posture, 16(2):124-34.
+#'
 #' @examples
 #' # Assuming acc_norm is the preprocessed vector magnitude signal:
 #' # result <- compute_gait_regularity(acc_norm)
@@ -247,7 +256,7 @@ compute_gait_regularity <- function(acc_norm,
   # Check if we found at least 2 peaks
   if (nrow(peaks) < 2) {
     warning(sprintf(
-      "Only %d peak(s) detected. Need at least 2 for step and stride regularity. ",
+      "Only %d peak(s) detected. Need at least 2 for step and stride regularity. %s",
       nrow(peaks),
       "Consider reducing peak_order or checking signal quality."
     ))

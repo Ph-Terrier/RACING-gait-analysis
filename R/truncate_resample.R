@@ -83,12 +83,17 @@
 #'   tilt-corrected.
 #' @param auto_orient Logical. If TRUE (default) and tilt correction is applied,
 #'   automatically detect and correct for inverted sensor orientation.
-#' @param step_freq_hz Numeric or NULL. If provided, skip step frequency 
-#'   detection and use this value. Useful when SF is already known or
-#'   for batch processing consistency.
+#' @param step_freq_hz Numeric or NULL. Pre-computed step frequency in Hz.
+#'   When apply_tilt_correction=TRUE, this value is IGNORED and SF is always
+#'   re-detected internally on the tilt-corrected vertical signal, matching
+#'   the MATLAB/ACIER pipeline order (calibphys -> SF_det_func). This prevents
+#'   a 1-FFT-bin shift (~0.003 Hz) that cascades into resampling phase drift.
+#'   When apply_tilt_correction=FALSE (pre-corrected data), this value is
+#'   used directly, skipping internal detection.
 #' @param freq_range Numeric vector of length 2. Physiological frequency range
 #'   c(min, max) in Hz for step frequency detection. Default: c(1.2, 3.0) 
-#'   covers typical adult gait (72-180 steps/min). Ignored if step_freq_hz is provided.
+#'   covers typical adult gait (72-180 steps/min). Only ignored when
+#'   step_freq_hz is provided AND apply_tilt_correction=FALSE.
 #' @param compute_norm Logical. If TRUE (default), compute and include 
 #'   the vector norm (magnitude) in outputs.
 #' @param norm_subtract_gravity Logical. If TRUE (default), subtract 1g from
@@ -149,8 +154,8 @@
 #' }
 #' 
 #' 
-#' #' @details
-#' ## Processing Pipeline (Exact ACIER Order)
+#' @details
+#' ## Processing Pipeline (Exact ACIER/MATLAB Order)
 #' 
 #' ```
 #' Raw Signals (x, y, z)
@@ -163,6 +168,8 @@
 #'         |
 #'         v
 #' [2] Step Frequency Detection (FFT) ----> SF [Hz]
+#'     ** MUST use tilt-corrected y' **
+#'     ** (even if step_freq_hz provided externally) **
 #'         |
 #'         v
 #' [3] Calculate Truncation Index --------> N_trunc
@@ -174,6 +181,13 @@
 #' [5] Resample to Standard Length -------> resampled output
 #' ```
 #' 
+#' NOTE: The order [1] before [2] is critical. MATLAB applies tilt correction
+#' (calibphys) before SF detection (SF_det_func). Detecting SF on raw
+#' (uncorrected) data shifts the FFT peak by 1 bin (~0.003 Hz) in ~50% of
+#' subjects, causing ~50 samples truncation difference, different resampling
+#' ratios, cumulative phase drift (r=0.99 -> r=0.02), and AMI/LDS/ACI
+#' mismatches.
+#' 
 #' ## Signal Length Calculations
 #' 
 #' 1. **Tilt Correction** (optional): Applies Moe-Nilssen (1998) algorithm to
@@ -181,7 +195,9 @@
 #'    inverted sensor orientation.
 #' 
 #' 2. **Step Frequency Detection**: Uses FFT on vertical acceleration to find
-#'    the dominant walking frequency. Can be skipped if step_freq_hz is provided.
+#'    the dominant walking frequency. When tilt correction is applied, SF is
+#'    always detected internally on the corrected signal (even if step_freq_hz
+#'    is provided). Can only be skipped when apply_tilt_correction=FALSE.
 #' 
 #' 3. **Truncation Index Calculation**: 
 #'    \code{truncation_index = floor(sampling_freq / step_freq_hz * target_steps)}
@@ -311,7 +327,7 @@
 #' @seealso 
 #' \code{\link{tilt_correction}} for the Moe-Nilssen tilt correction algorithm
 #' \code{\link{resample_signal}} for the resampling implementation
-#' \code{\link{step_frequency_fft}} for FFT-based step frequency detection \code{\link{step_frequency_fft}} for step frequency detection
+#' \code{\link{step_frequency_fft}} for FFT-based step frequency detection
 #' 
 #' @export
 truncate_resample <- function(acc_x, 
@@ -328,7 +344,8 @@ truncate_resample <- function(acc_x,
                                compute_norm = TRUE,
                                norm_subtract_gravity = TRUE,
                                resampling_method = c("auto", "direct", "two_stage"),
-                               verbose = FALSE) {
+                               verbose = TRUE,
+                               log_file = NULL) {
   
   # ===========================================================================
   # Input Validation
@@ -484,11 +501,34 @@ truncate_resample <- function(acc_x,
   # ===========================================================================
   # Step 2: Step Frequency Detection
   # ===========================================================================
+  # CRITICAL: SF must be detected on the TILT-CORRECTED vertical signal to
+  # match the MATLAB/ACIER pipeline (calibphys -> SF_det_func). Tilt
+  # correction redistributes energy between axes, shifting the FFT peak by
+  # up to 1 frequency bin (~0.003 Hz). This cascades into truncation length
+  # differences (~50 samples), different resampling ratios, and progressive
+  # phase drift that decorrelates the resampled signals (r: 0.99 -> 0.02).
+  #
+  # Therefore, when apply_tilt_correction=TRUE, SF is ALWAYS detected
+  # internally on the corrected acc_y, even if step_freq_hz was provided
+  # externally (which may have been computed on uncorrected data).
+  #
+  # When apply_tilt_correction=FALSE (pre-corrected data), an externally
+  # provided step_freq_hz is used as-is.
+  # ===========================================================================
   
- 
+  # Determine whether SF must be (re-)detected internally
+  detect_sf_internally <- is.null(step_freq_hz) ||
+                          (apply_tilt_correction && !is.null(step_freq_hz))
   
-  if (is.null(step_freq_hz)) {
-    if (verbose) message("Detecting step frequency from vertical acceleration...")
+  if (detect_sf_internally) {
+    
+    if (!is.null(step_freq_hz) && apply_tilt_correction && verbose) {
+      message(sprintf(
+        "  Note: Overriding provided SF (%.4f Hz) - re-detecting on tilt-corrected signal",
+        step_freq_hz))
+    }
+    
+    if (verbose) message("Detecting step frequency from tilt-corrected vertical acceleration...")
     
     # Check if step_frequency_fft function is available
     if (!exists("step_frequency_fft", mode = "function")) {
@@ -510,9 +550,23 @@ truncate_resample <- function(acc_x,
       message(sprintf("  Detected: %.3f Hz (%.1f steps/min)",
                       step_freq_hz, step_freq_hz * 60))
     }
-  }  
+  } else {
+    if (verbose) {
+      message(sprintf("  Using provided SF: %.4f Hz (%.1f steps/min) [no tilt correction]",
+                      step_freq_hz, step_freq_hz * 60))
+    }
+  }
   
   step_freq_bpm <- step_freq_hz * 60
+  
+  # Round SF to 0.1 Hz for truncation (RACING: ensures MATLAB/R convergence)
+  # Precise SF is preserved in metadata for reporting
+  step_freq_hz_precise <- step_freq_hz
+  step_freq_hz <- round(step_freq_hz, 1)
+  
+  # Log step frequency to debug file (if active)
+  resample_log(log_file, "SF detection: precise=%.4f Hz, rounded=%.1f Hz (%.1f bpm)",
+               step_freq_hz_precise, step_freq_hz, step_freq_bpm)
   
   # ===========================================================================
   # Step 3: Calculate Truncation Index
@@ -523,6 +577,10 @@ truncate_resample <- function(acc_x,
   
   # Total samples needed for target_steps
   truncation_index <- floor(samples_per_step_original * target_steps)
+  
+  # Log truncation to debug file (if active)
+  resample_log(log_file, "Truncation: %.2f samples/step x %d steps = %d samples (signal has %d)",
+               samples_per_step_original, target_steps, truncation_index, n)
   
   if (verbose) {
     message(sprintf("Truncation: %.1f samples/step  x  %d steps = %d samples needed",
@@ -614,6 +672,11 @@ truncate_resample <- function(acc_x,
                     target_samples / truncation_index))
   }
   
+  # Log resampling setup to debug file (if active)
+  resample_log(log_file, "Resampling: %d -> %d (ratio=%.6f, method=%s)",
+               truncation_index, target_samples,
+               target_samples / truncation_index, resampling_method)
+  
   # Check if resample_signal function is available
   if (!exists("resample_signal", mode = "function")) {
     if (file.exists("resample_signal.R")) {
@@ -625,14 +688,17 @@ truncate_resample <- function(acc_x,
   
   # Resample each component
   resamp_x <- resample_signal(trunc_x, target_samples, 
-                               method = resampling_method, 
-                               debug = verbose)
+                              method = resampling_method, 
+                              debug = verbose,
+                              log_file = log_file, log_label = "x")
   resamp_y <- resample_signal(trunc_y, target_samples, 
-                               method = resampling_method,
-                               debug = FALSE)  # Only verbose for first one
+                              method = resampling_method,
+                              debug = FALSE,
+                              log_file = log_file, log_label = "y")
   resamp_z <- resample_signal(trunc_z, target_samples, 
-                               method = resampling_method,
-                               debug = FALSE)
+                              method = resampling_method,
+                              debug = FALSE,
+                              log_file = log_file, log_label = "z")
   
   # Get resampling method that was actually used
   method_used <- attr(resamp_x, "method_used")
@@ -641,8 +707,9 @@ truncate_resample <- function(acc_x,
   resamp_norm <- NULL
   if (compute_norm) {
     resamp_norm <- resample_signal(trunc_norm, target_samples,
-                                    method = resampling_method,
-                                    debug = FALSE)
+                                   method = resampling_method,
+                                   debug = FALSE,
+                                   log_file = log_file, log_label = "norm")
   }
   
   if (was_problematic && verbose) {
@@ -675,7 +742,7 @@ truncate_resample <- function(acc_x,
   
   # Metadata
   metadata <- list(
-    step_freq_hz = step_freq_hz,
+    step_freq_hz = step_freq_hz_precise,
     step_freq_bpm = step_freq_bpm,
     target_steps = target_steps,
     actual_steps = actual_steps,

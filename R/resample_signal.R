@@ -1,90 +1,62 @@
 #' ============================================================================
-#' Robust Signal Resampling Function 
+#' Robust Signal Resampling Function (MATLAB-compatible)
 #' ============================================================================
 #' 
-#' A generic function for resampling signals to a target length using
-#' polyphase filtering (via gsignal package).
+#' Resamples signals to a target length using polyphase filtering,
+#' replicating MATLAB's resample(x, p, q, N, beta) algorithm exactly.
 #' 
 #' @author Philippe Terrier / ORD 2025 Project (RACING)
-#' @date February 2026
-#' @version 2.1
+#' @date March 2026
+#' @version 3.5
 #' @license MIT
+#'
+#' KEY FIX (v3.5): Raised auto-mode threshold from 100 to 50000 filter phases.
+#' The old threshold flagged 99% of ACIER signals as "problematic" even though
+#' all completed successfully in direct mode (max buffer ~2.4 GB, well within
+#' R's 16 GB integer limit). The overflow guard (.would_overflow) remains as the
+#' real safety net. Console output clarified: ratio diagnostics no longer print
+#' misleading "Problematic = TRUE" when method is forced to "direct".
+#'
+#' KEY FIX (v3.4): Added file-based debug logging via log_file parameter.
+#' In batch mode, call resample_log_header() once, then pass log_file to
+#' every resample_signal() call. The log accumulates all algorithmic
+#' details: signal stats, ratio analysis, filter design, delay compensation,
+#' upfirdn buffer sizes, extraction indices, and output statistics.
+#'
+#' KEY FIX (v3.3): Filter design uses O(N) sinc computation instead of
+#' O(N^3) firls. For the ACIER 75/128 ratio, firls builds and solves a
+#' 2561x2561 matrix (~52 MB) via pracma::mldivide, taking 5-10 minutes.
+#' MATLAB's firls with zero-width transition band [0 2fc 2fc 1] produces
+#' the ideal lowpass sinc function -- we compute it directly in O(N).
+#' After Kaiser windowing and normalization, results are near-identical.
 #' 
-#' This function handles the "close length issue" when the resampling 
-#' ratio is close to 1, using two-stage resampling.
+#' Architecture: implements MATLAB's uniformResample() algorithm,
+#' calling gsignal::upfirdn() (compiled C++) for the polyphase step.
+#' Filter caching across axes (norm, x, y, z) per subject.
 #' 
 #' @references
-#' MATLAB resample documentation:
-#' https://www.mathworks.com/help/signal/ref/resample.html
+#' MATLAB resample():
+#'   https://www.mathworks.com/help/signal/ref/resample.html
+#' MATLAB source: Signal Processing Toolbox, uniformResample()
 #' ============================================================================
+
 
 # =============================================================================
 # Package Availability Check
 # =============================================================================
 
-# Check for gsignal (preferred)
 HAS_GSIGNAL_PKG <- requireNamespace("gsignal", quietly = TRUE)
-
-# Check for signal (fallback)
 HAS_SIGNAL_PKG <- requireNamespace("signal", quietly = TRUE)
 
-# Validate that at least one package is available
 if (!HAS_GSIGNAL_PKG && !HAS_SIGNAL_PKG) {
   warning("Neither 'gsignal' nor 'signal' package is available.\n",
           "Install gsignal for MATLAB-compatible resampling:\n",
           "  install.packages('gsignal')\n",
           "Spline interpolation will be used as fallback (not recommended).")
 }
-
 if (!HAS_GSIGNAL_PKG && HAS_SIGNAL_PKG) {
   message("Note: Using 'signal' package. For better MATLAB compatibility,\n",
           "      install 'gsignal': install.packages('gsignal')")
-}
-
-
-# =============================================================================
-# Internal Resampling Functions
-# =============================================================================
-
-#' Internal: Polyphase resampling using gsignal package #' 
-#' gsignal::resample uses the same polyphase FIR algorithm as MATLAB:
-#' 1. Design anti-aliasing FIR filter with Kaiser window
-#' 2. Apply via upfirdn (polyphase decomposition)
-#' 
-#' @keywords internal
-.resample_polyphase <- function(x, p, q) {
-  if (!HAS_GSIGNAL_PKG) {
-    stop("gsignal package not available")
-  }
-  return(gsignal::resample(x, p, q))
-}
-
-
-#' Internal: Bandlimited resampling using signal package (legacy fallback)
-#' 
-#' signal::resample uses sinc-based interpolation, which differs from MATLAB.
-#' Use only as fallback when gsignal is not available.
-#' 
-#' @keywords internal
-.resample_bandlimited <- function(x, p, q) {
-  if (!HAS_SIGNAL_PKG) {
-    stop("signal package not available")
-  }
-  return(signal::resample(x, p, q))
-}
-
-
-#' Internal: Spline-based resampling (last resort fallback)
-#' 
-#' Uses cubic spline interpolation. NOT recommended for dynamical analysis
-#' as it may not preserve frequency content properly.
-#' 
-#' @keywords internal
-.resample_spline <- function(x, target_length) {
-  n <- length(x)
-  x_orig <- seq(0, 1, length.out = n)
-  x_new <- seq(0, 1, length.out = target_length)
-  return(spline(x_orig, x, xout = x_new, method = "natural")$y)
 }
 
 
@@ -93,19 +65,10 @@ if (!HAS_GSIGNAL_PKG && HAS_SIGNAL_PKG) {
 # =============================================================================
 
 #' Calculate Greatest Common Divisor (GCD)
-#' 
-#' Uses Euclidean algorithm to compute the GCD of two integers.
-#' 
 #' @param a First integer
 #' @param b Second integer
 #' @return GCD of a and b
-#' 
-#' @examples
-#' gcd(18750, 16000)  # Returns 250
-#' gcd(18750, 18100)  # Returns 50 (problematic - small GCD)
-#' 
 #' @export
-
 gcd <- function(a, b) {
   a <- abs(as.integer(a))
   b <- abs(as.integer(b))
@@ -118,39 +81,410 @@ gcd <- function(a, b) {
 }
 
 
+# =============================================================================
+# Filter Cache
+# =============================================================================
+# In batch processing (ACIER), the same resampling ratio is used for 4 axes
+# (norm, x, y, z) per subject/condition. Designing the firls filter once
+# and reusing it for all 4 axes saves ~75% of filter design time.
+#
+# The cache is keyed by (p_red, q_red, n, beta) -- cleared with
+# clear_resample_cache() or automatically when R session ends.
+# =============================================================================
+
+.resample_filter_cache <- new.env(parent = emptyenv())
+
+#' Clear the resampling filter cache
+#' @export
+clear_resample_cache <- function() {
+  rm(list = ls(.resample_filter_cache), envir = .resample_filter_cache)
+}
+
+
+# =============================================================================
+# Debug File Logging
+# =============================================================================
+# When log_file is set, every resampling call appends detailed trace info
+# to the file. In batch mode this accumulates across all subjects/axes,
+# giving a complete record for comparison with MATLAB.
+#
+# Usage:
+#   resample_log_header("resample_log.txt")   # once at batch start
+#   resample_signal(x, target, log_file = "resample_log.txt")
+#   resample_signal(y, target, log_file = "resample_log.txt")  # appends
+# =============================================================================
+
+#' Write a line to the resampling debug log file
+#' @param log_file Path to log file (NULL = skip)
+#' @param ... Arguments passed to sprintf
+#' @keywords internal
+.resample_log <- function(log_file, fmt, ...) {
+  if (is.null(log_file)) return(invisible(NULL))
+  line <- sprintf(fmt, ...)
+  cat(line, "\n", file = log_file, append = TRUE, sep = "")
+}
+
+#' Write a separator block to the log
+#' @keywords internal
+.resample_log_sep <- function(log_file, label = "") {
+  if (is.null(log_file)) return(invisible(NULL))
+  rule <- paste(rep("=", 72), collapse = "")
+  cat("\n", rule, "\n", file = log_file, append = TRUE, sep = "")
+  if (nzchar(label)) {
+    cat(label, "\n", file = log_file, append = TRUE, sep = "")
+    cat(rule, "\n", file = log_file, append = TRUE, sep = "")
+  }
+}
+
+#' Log signal summary statistics
+#' @keywords internal
+.resample_log_signal <- function(log_file, label, x) {
+  if (is.null(log_file)) return(invisible(NULL))
+  n <- length(x)
+  .resample_log(log_file, "  %s: n=%d, range=[%.6g, %.6g], mean=%.6g, sd=%.6g",
+                label, n, min(x), max(x), mean(x), sd(x))
+  # First and last 5 values (critical for boundary effects)
+  head_vals <- paste(sprintf("%.6g", head(x, 5)), collapse = ", ")
+  tail_vals <- paste(sprintf("%.6g", tail(x, 5)), collapse = ", ")
+  .resample_log(log_file, "    head(5): %s", head_vals)
+  .resample_log(log_file, "    tail(5): %s", tail_vals)
+}
+
+#' Write a header to the log file (call once before batch processing)
+#'
+#' @param log_file Path to log file (created/overwritten)
+#' @param session_info Logical. Include R session info (default: TRUE)
+#' @export
+resample_log_header <- function(log_file, session_info = TRUE) {
+  # Overwrite (not append) to start fresh
+  rule <- paste(rep("=", 72), collapse = "")
+  cat(rule, "\n", file = log_file, append = FALSE, sep = "")
+  cat("RACING Resampling Debug Log\n", file = log_file, append = TRUE)
+  cat(sprintf("Generated: %s\n", format(Sys.time(), "%Y-%m-%d %H:%M:%S")),
+      file = log_file, append = TRUE)
+  cat(rule, "\n", file = log_file, append = TRUE, sep = "")
+  
+  if (session_info) {
+    cat(sprintf("R version: %s\n", R.version.string), file = log_file, append = TRUE)
+    cat(sprintf("Platform:  %s\n", R.version$platform), file = log_file, append = TRUE)
+    cat(sprintf("gsignal:   %s\n",
+                ifelse(HAS_GSIGNAL_PKG,
+                       as.character(packageVersion("gsignal")), "NOT INSTALLED")),
+        file = log_file, append = TRUE)
+    cat(sprintf("signal:    %s\n",
+                ifelse(HAS_SIGNAL_PKG,
+                       as.character(packageVersion("signal")), "NOT INSTALLED")),
+        file = log_file, append = TRUE)
+  }
+  cat("\n", file = log_file, append = TRUE)
+  invisible(log_file)
+}
+
+#' Write a separator block to the resampling log file
+#'
+#' Public wrapper for .resample_log_sep(), for use in batch scripts
+#' and truncate_resample.R. Writes a visible separator with an
+#' optional label (e.g., file name) to the log file.
+#'
+#' @param log_file Path to log file (NULL = skip)
+#' @param label Character. Text to display in the separator block.
+#' @export
+resample_log_sep <- function(log_file, label = "") {
+  .resample_log_sep(log_file, label)
+}
+
+#' Write a formatted line to the resampling log file
+#'
+#' Public wrapper for .resample_log(), for use in other scripts
+#' (e.g., truncate_resample.R) that need to write context lines
+#' to the same log file.
+#'
+#' @param log_file Path to log file (NULL = skip)
+#' @param fmt Character. sprintf format string.
+#' @param ... Values for sprintf placeholders.
+#' @export
+resample_log <- function(log_file, fmt, ...) {
+  .resample_log(log_file, fmt, ...)
+}
+
+
+# =============================================================================
+# Internal: MATLAB-compatible Filter Design
+# =============================================================================
+
+#' Design MATLAB-compatible resampling filter (with caching)
+#'
+#' Replicates MATLAB's uniformResample() filter design:
+#'   fc    = 1 / (2 * pqmax)
+#'   order = 2 * N * pqmax
+#'   h     = firls(order, [0 2fc 2fc 1], [1 1 0 0]) .* kaiser(order+1, beta)
+#'   h     = p * h / sum(h)
+#'
+#' PERFORMANCE NOTE (v3.3):
+#'   MATLAB's firls with zero-width transition band [0 2fc 2fc 1] converges
+#'   to the ideal lowpass sinc function. We compute sinc directly: O(N) vs
+#'   O(N^3) for the matrix solve in gsignal::firls. For order=5120 (ACIER
+#'   75/128 ratio), this reduces filter design from ~5-10 min to <0.01 sec.
+#'   The resulting filter is mathematically equivalent after Kaiser windowing.
+#'
+#' p and q MUST be GCD-reduced (coprime) before calling.
+#'
+#' @param p Upsampling factor (coprime with q)
+#' @param q Downsampling factor (coprime with p)
+#' @param n Half-order (MATLAB default=10, ACIER=20)
+#' @param beta Kaiser shape parameter (MATLAB default=5)
+#' @param use_cache Logical. Use filter cache (default: TRUE).
+#' @return FIR filter coefficient vector
+#' @keywords internal
+.design_matlab_resample_filter <- function(p, q, n = 20, beta = 5, 
+                                           use_cache = TRUE,
+                                           log_file = NULL) {
+  # Check cache first
+  cache_key <- sprintf("p%d_q%d_n%d_b%.2f", p, q, n, beta)
+  from_cache <- use_cache && exists(cache_key, envir = .resample_filter_cache)
+  if (from_cache) {
+    h <- get(cache_key, envir = .resample_filter_cache)
+    .resample_log(log_file, "  Filter: from cache [%s], %d taps", cache_key, length(h))
+    return(h)
+  }
+  
+  pqmax <- max(p, q)
+  fc <- 1 / (2 * pqmax)     # normalized cutoff
+  order <- 2 * n * pqmax    # filter order
+  L <- order + 1             # filter length
+  
+  .resample_log(log_file, "  Filter design: key=%s, pqmax=%d, fc=%.8f, order=%d, L=%d",
+                cache_key, pqmax, fc, order, L)
+  
+  # -----------------------------------------------------------------------
+  # Ideal lowpass via sinc (replaces firls -- see PERFORMANCE NOTE above)
+  #
+  # MATLAB: firls(order, [0 2*fc 2*fc 1], [1 1 0 0])
+  # With zero-width transition band, firls converges to ideal lowpass:
+  #   h_ideal[k] = sin(2*pi*fc * (k - order/2)) / (pi * (k - order/2))
+  #   h_ideal[order/2] = 2 * fc
+  # This is the standard sinc(2*fc*x) = sin(pi*2*fc*x) / (pi*2*fc*x)
+  # -----------------------------------------------------------------------
+  k <- seq(0, order)
+  m <- k - order / 2           # centered sample indices
+  
+  # Compute sinc: sin(pi*x)/(pi*x) with x = 2*fc*m
+  x <- 2 * fc * m
+  h <- numeric(L)
+  nz <- abs(x) > 1e-20         # non-zero indices (avoid 0/0)
+  h[nz] <- sin(pi * x[nz]) / (pi * x[nz])
+  h[!nz] <- 1.0                # sinc(0) = 1
+  
+  # Apply Kaiser window (same as MATLAB)
+  w <- gsignal::kaiser(L, beta)
+  h <- h * w
+  
+  # Normalize: MATLAB does h = p * h / sum(h)
+  h <- p * h / sum(h)
+  
+  # Log filter characteristics
+  .resample_log(log_file, "    sum(h_raw) before norm: computed, h normalized to sum=%.8f", sum(h))
+  .resample_log(log_file, "    h range: [%.8g, %.8g], max at index %d",
+                min(h), max(h), which.max(h))
+  h5 <- paste(sprintf("%.8g", head(h, 5)), collapse = ", ")
+  .resample_log(log_file, "    h head(5): %s", h5)
+  
+  # Store in cache
+  if (use_cache) {
+    assign(cache_key, h, envir = .resample_filter_cache)
+  }
+  
+  return(h)
+}
+
+
+# =============================================================================
+# Internal: Direct MATLAB resample implementation
+# =============================================================================
+
+#' Direct port of MATLAB's uniformResample algorithm
+#'
+#' This function implements MATLAB's resample() line-by-line, calling
+#' gsignal::upfirdn() directly (compiled C) instead of going through
+#' gsignal::resample() (R wrapper with overhead).
+#'
+#' MATLAB algorithm (from uniformResample in resample.m):
+#'   1. [p, q] = rat(p/q, 1e-12)          -- reduce to coprime
+#'   2. design filter h for max(p,q)       -- firls + kaiser
+#'   3. Lhalf = (L-1)/2                    -- half filter length
+#'   4. nZeroBegin = floor(q - Lhalf%%q)   -- prepend zeros for alignment
+#'   5. h = [zeros, h]                     -- prepend
+#'   6. delay = floor(ceil(Lhalf)/q)       -- output delay
+#'   7. pad h with trailing zeros          -- ensure output length
+#'   8. y_full = upfirdn(x, h, p, q)      -- polyphase filtering (C code)
+#'   9. y = y_full[delay + (1:Ly)]         -- trim to output length
+#'
+#' @param x Numeric vector. Input signal.
+#' @param p Integer. Target length (before GCD reduction).
+#' @param q Integer. Original length (before GCD reduction).
+#' @param n Integer. Filter half-order (default=20).
+#' @param beta Numeric. Kaiser beta (default=5).
+#' @param debug Logical. Print sub-step timing (default=FALSE).
+#' @return Resampled signal vector of length ceil(length(x) * p / q).
+#' @keywords internal
+.resample_matlab <- function(x, p, q, n = 20, beta = 5, debug = FALSE,
+                            log_file = NULL) {
+  if (!HAS_GSIGNAL_PKG) {
+    stop("gsignal package required for MATLAB-compatible resampling")
+  }
+  
+  Lx <- length(x)
+  
+  # -------------------------------------------------------------------
+  # Step 1: Reduce p/q to coprime (MATLAB: [p,q] = rat(p/q, 1e-12))
+  # -------------------------------------------------------------------
+  g <- gcd(p, q)
+  p <- as.integer(p / g)
+  q <- as.integer(q / g)
+  
+  .resample_log(log_file, "  .resample_matlab: Lx=%d, raw p/q=%d/%d, GCD=%d, reduced p/q=%d/%d",
+                Lx, as.integer(p * g), as.integer(q * g), g, p, q)
+  
+  # Trivial case
+  if (p == 1L && q == 1L) {
+    .resample_log(log_file, "  -> Trivial (p=q=1), returning input unchanged")
+    return(x)
+  }
+  
+  # -------------------------------------------------------------------
+  # Step 2: Design filter (MATLAB: firls + kaiser, with caching)
+  # -------------------------------------------------------------------
+  if (debug) t0 <- proc.time()["elapsed"]
+  
+  h <- .design_matlab_resample_filter(p, q, n = n, beta = beta,
+                                       log_file = log_file)
+  
+  if (debug) {
+    dt <- proc.time()["elapsed"] - t0
+    message(sprintf("    [timing] Filter design (sinc+kaiser): %.4f sec (%d taps, %s)",
+                    dt, length(h),
+                    ifelse(exists(sprintf("p%d_q%d_n%d_b%.2f", p, q, n, beta),
+                                  envir = .resample_filter_cache),
+                           "cached", "computed")))
+  }
+  
+  # -------------------------------------------------------------------
+  # Step 3-6: Delay compensation (exact MATLAB logic)
+  # -------------------------------------------------------------------
+  # MATLAB: Lhalf = (L-1)/2
+  L <- length(h)
+  Lhalf <- (L - 1) / 2
+  
+  # MATLAB: nZeroBegin = floor(q - mod(Lhalf, q))
+  nZeroBegin <- floor(q - (Lhalf %% q))
+  
+  # MATLAB: h = [zeros(1, nZeroBegin), h]
+  h_padded <- c(rep(0, nZeroBegin), h)
+  Lhalf_orig <- Lhalf
+  Lhalf <- Lhalf + nZeroBegin
+  
+  # MATLAB: delay = floor(ceil(Lhalf) / q)
+  delay <- floor(ceiling(Lhalf) / q)
+  
+  # Output length: MATLAB: Ly = ceil(Lx * p / q)
+  Ly <- ceiling(Lx * p / q)
+  
+  .resample_log(log_file, "  Delay compensation:")
+  .resample_log(log_file, "    L=%d, Lhalf_orig=%.1f, Lhalf%%q=%.1f",
+                L, Lhalf_orig, Lhalf_orig %% q)
+  .resample_log(log_file, "    nZeroBegin=%d, Lhalf_adjusted=%.1f", nZeroBegin, Lhalf)
+  .resample_log(log_file, "    ceil(Lhalf)=%d, delay=floor(%d/%d)=%d",
+                ceiling(Lhalf), ceiling(Lhalf), q, delay)
+  .resample_log(log_file, "    Ly=ceil(%d*%d/%d)=%d", Lx, p, q, Ly)
+  
+  # -------------------------------------------------------------------
+  # Step 7: Compute trailing zero-pad
+  # -------------------------------------------------------------------
+  Lh_current <- length(h_padded)
+  Lh_needed <- (delay + Ly - 1) * q - (Lx - 1) * p + 1
+  nZeroEnd <- max(0L, as.integer(Lh_needed - Lh_current))
+  h_padded <- c(h_padded, rep(0, nZeroEnd))
+  
+  .resample_log(log_file, "  Zero-padding:")
+  .resample_log(log_file, "    Lh_current=%d, Lh_needed=%d, nZeroEnd=%d, Lh_final=%d",
+                Lh_current, as.integer(Lh_needed), nZeroEnd, length(h_padded))
+  
+  # -------------------------------------------------------------------
+  # Step 8: Call upfirdn (compiled C -- this is the fast part)
+  # -------------------------------------------------------------------
+  if (debug) t0 <- proc.time()["elapsed"]
+  
+  .resample_log(log_file, "  upfirdn call: x[%d], h[%d], p=%d, q=%d",
+                Lx, length(h_padded), p, q)
+  
+  y_full <- gsignal::upfirdn(x, h_padded, p, q)
+  
+  .resample_log(log_file, "  upfirdn result: length=%d (%.2f M elements)",
+                length(y_full), length(y_full) / 1e6)
+  
+  if (debug) {
+    dt <- proc.time()["elapsed"] - t0
+    message(sprintf("    [timing] upfirdn: %.4f sec (buffer = %.2f M elements)",
+                    dt, length(y_full) / 1e6))
+  }
+  
+  # -------------------------------------------------------------------
+  # Step 9: Extract output with delay compensation
+  # MATLAB: y = yVec(delay + (1:Ly))
+  # -------------------------------------------------------------------
+  idx_start <- delay + 1L
+  idx_end <- delay + Ly
+  
+  .resample_log(log_file, "  Extraction: y_full[%d:%d] (delay=%d, Ly=%d)",
+                idx_start, idx_end, delay, Ly)
+  
+  if (idx_end > length(y_full)) {
+    .resample_log(log_file, "  [!] WARNING: idx_end=%d > length(y_full)=%d",
+                  idx_end, length(y_full))
+  }
+  
+  idx <- delay + seq_len(Ly)
+  y <- y_full[idx]
+  
+  # Log output signal stats
+  .resample_log_signal(log_file, "OUTPUT", y)
+  
+  return(y)
+}
+
+
+# =============================================================================
+# Fallback Resampling Functions
+# =============================================================================
+
+#' @keywords internal
+.resample_bandlimited <- function(x, p, q) {
+  if (!HAS_SIGNAL_PKG) stop("signal package not available")
+  return(signal::resample(x, p, q))
+}
+
+#' @keywords internal
+.resample_spline <- function(x, target_length) {
+  n_pts <- length(x)
+  x_orig <- seq(0, 1, length.out = n_pts)
+  x_new <- seq(0, 1, length.out = target_length)
+  return(spline(x_orig, x, xout = x_new, method = "natural")$y)
+}
+
+
+# =============================================================================
+# Ratio Analysis
+# =============================================================================
+
 #' Check if Resampling Ratio is Problematic
-#' 
-#' Analyzes the resampling ratio to determine if it will cause
-#' numerical instability in the polyphase filter.
 #' 
 #' @param original_length Integer. Length of the original signal.
 #' @param target_length Integer. Desired length after resampling.
 #' @param threshold Integer. Maximum allowed filter phases (default: 100).
-#' 
-#' @return A list containing:
-#' \describe{
-#'   \item{ratio}{The resampling ratio (target/original)}
-#'   \item{gcd}{Greatest common divisor of lengths}
-#'   \item{p_reduced}{Reduced numerator (target / gcd)}
-#'   \item{q_reduced}{Reduced denominator (original / gcd)}
-#'   \item{filter_phases}{Number of polyphase filter phases required}
-#'   \item{is_problematic}{Logical. TRUE if ratio is problematic.}
-#' }
-#' 
-#' @examples
-#' # Safe ratio (large GCD)
-#' check_resampling_ratio(16000, 18750)
-#' # $filter_phases = 75, $is_problematic = FALSE
-#' 
-#' # Problematic ratio (small GCD, close to 1)
-#' check_resampling_ratio(18100, 18750)
-#' # $filter_phases = 375, $is_problematic = TRUE
-#' 
+#' @return A list with ratio diagnostics.
 #' @export
-check_resampling_ratio <- function(original_length, target_length, threshold = 100) {
+check_resampling_ratio <- function(original_length, target_length, threshold = 50000) {
   
-
-  # Input validation
   stopifnot(
     is.numeric(original_length), length(original_length) == 1, original_length > 0,
     is.numeric(target_length), length(target_length) == 1, target_length > 0,
@@ -160,19 +494,16 @@ check_resampling_ratio <- function(original_length, target_length, threshold = 1
   original_length <- as.integer(original_length)
   target_length <- as.integer(target_length)
   
-  # Calculate GCD
   g <- gcd(original_length, target_length)
-  
-  # Reduce to coprime integers
   p_reduced <- target_length / g
   q_reduced <- original_length / g
-  
-  # Calculate filter complexity (number of phases)
-  # This is max(p, q) after reduction to coprime form
   filter_phases <- max(p_reduced, q_reduced)
+  filter_length <- 2L * 20L * filter_phases + 1L
   
-  # Determine if problematic
-  is_problematic <- filter_phases > threshold
+  # upfirdn buffer with REDUCED ratio: (Lx-1)*p_red + filter_length
+  upfirdn_buffer <- as.double(original_length - 1) * as.double(p_reduced) +
+                    as.double(filter_length)
+  upfirdn_buffer_MB <- upfirdn_buffer * 8 / 1024 / 1024
   
   return(list(
     ratio = target_length / original_length,
@@ -180,7 +511,10 @@ check_resampling_ratio <- function(original_length, target_length, threshold = 1
     p_reduced = p_reduced,
     q_reduced = q_reduced,
     filter_phases = filter_phases,
-    is_problematic = is_problematic
+    filter_length = filter_length,
+    upfirdn_buffer = upfirdn_buffer,
+    upfirdn_buffer_MB = upfirdn_buffer_MB,
+    is_problematic = filter_phases > threshold
   ))
 }
 
@@ -189,132 +523,109 @@ check_resampling_ratio <- function(original_length, target_length, threshold = 1
 # Main Resampling Function
 # =============================================================================
 
-#' Resample Signal with Automatic Problematic Ratio Handling
+#' Resample Signal (MATLAB-compatible, optimized)
 #' 
-#' Resamples a signal to a target length using polyphase filtering.
-#' 
-#' Automatically detects and handles problematic ratios where the
-#' target length is close to the original length.
+#' Resamples a signal to a target length using polyphase filtering,
+#' replicating MATLAB's resample(x, p, q, N, beta) algorithm exactly.
 #' 
 #' @param signal Numeric vector. The input signal to resample.
 #' @param target_length Integer. The desired output length.
-#' @param method Character. Resampling method:
+#' @param method Character. Resampling strategy:
 #' \describe{
-#'   \item{"auto"}{(default) Automatically detect and handle problematic ratios}
-#'   \item{"direct"}{Always use direct resampling (may fail for problematic ratios)}
+#'   \item{"auto"}{(default) Use two-stage only when it improves the ratio}
+#'   \item{"direct"}{Always use direct resampling}
 #'   \item{"two_stage"}{Always use two-stage resampling}
 #' }
-#' @param complexity_threshold Integer. Maximum filter phases before considering
-#'   ratio problematic (default: 100).
-#' @param intermediate_factor Numeric. Factor to multiply original length
-#'   for intermediate step in two-stage resampling (default: 1.5 = 3/2).
-#' @param debug Logical. Print diagnostic messages (default: FALSE).
-#' @param use_fallback Logical. If TRUE and gsignal is unavailable,
-#'   fall back to signal package, then spline (default: TRUE).
+#' @param complexity_threshold Integer. Max filter phases for "auto" (default: 50000).
+#'   Only relevant when method="auto". The overflow guard (.would_overflow) provides
+#'   a hard safety check regardless of this threshold.
+#' @param n Integer. Filter half-order (default: 20, matching ACIER).
+#' @param beta Numeric. Kaiser window beta (default: 5).
+#' @param debug Logical. Print diagnostics with sub-step timing (default: FALSE).
+#' @param use_fallback Logical. Fall back to signal/spline if needed (default: TRUE).
+#' @param log_file Character or NULL. Path to debug log file. When set,
+#'   detailed trace information is appended to this file for every call.
+#'   Use \code{resample_log_header()} to initialize the log before batch
+#'   processing. Default: NULL (no file logging).
+#' @param log_label Character. Optional label for this call (e.g.,
+#'   "S01_indoor_norm") to identify entries in the log file.
 #' 
-#' @return Numeric vector of length \code{target_length}. The resampled signal.
-#'   Includes attributes:
-#' \describe{
-#'   \item{method_used}{"direct", "two_stage", or "none"}
-#'   \item{original_length}{Length of input signal}
-#'   \item{filter_phases}{Number of polyphase filter phases}
-#'   \item{was_problematic}{Whether the ratio was detected as problematic}
-#'   \item{backend}{"gsignal" (polyphase), "signal" (sinc), or "spline"}
-#' }
+#' @return Numeric vector of length \code{target_length} with metadata attributes.
 #' 
 #' @details
-#' ## Algorithm (gsignal - MATLAB like)
+#' ## Performance
 #' 
-#' The function uses polyphase filtering via \code{gsignal::resample()},
-#' which implements the same algorithm as MATLAB's \code{resample()}:
+#' This function bypasses gsignal::resample() entirely and calls 
+#' gsignal::upfirdn() (compiled C) directly. The filter is cached
+#' so that resampling 4 axes with the same ratio only designs the
+#' filter once. Typical speedup vs v3.1: 2-5x.
 #' 
-#' 1. Design FIR anti-aliasing filter (Kaiser window)
-#' 2. Apply via polyphase decomposition (upfirdn)
-#' 3. Compensate for filter delay
+#' ## Algorithm
 #' 
-#' This preserves the signal's frequency content up to the Nyquist frequency,
-#' which is essential for preserving dynamical properties needed for:
-#' - Lyapunov exponent estimation (LDS, ACI)
-#' - Phase space reconstruction
-#' - Attractor analysis
+#' Direct port of MATLAB's uniformResample():
+#' 1. Reduce p/q to coprime via GCD
+#' 2. Design firls+Kaiser filter (cached)
+#' 3. Compute delay compensation (nZeroBegin, nZeroEnd)
+#' 4. Call upfirdn(x, h_padded, p_red, q_red)  [compiled C]
+#' 5. Extract y = y_full[delay + (1:Ly)]
 #' 
-#' ## Problematic Ratio Handling
+#' ## Two-Stage Handling
 #' 
-#' When the resampling ratio is close to 1, the polyphase filter requires
-#' many phases, causing numerical instability. This is detected when
-#' \code{max(p, q) / gcd(p, q) > complexity_threshold}.
+#' When ratio is near 1.0 (problematic), uses MATLAB's shrink-first:
+#' Stage 1: resample(x, 2, 3, N, beta)  -- shrink to 2/3
+#' Stage 2: resample(temp, target, length(temp), N, beta)
 #' 
-#' The two-stage solution:
-#' 1. Upsample by \code{intermediate_factor} (default 1.5)
-#' 2. Resample to target length
-#' 
-#' This changes the GCD structure to reduce filter complexity.
-#' 
-#' ## Comparison with v1
-#' 
-#' Version 1 used \code{signal::resample()} which implements sinc-based
-
-#' bandlimited interpolation. Version 2 uses \code{gsignal::resample()}
-#' which implements polyphase filtering (same as MATLAB).
-#' 
+#' Two-stage is only applied when Stage 2 has fewer filter phases
+#' than direct (P4 smart check).
 #' 
 #' @examples
-#' # Basic usage
-#' sig <- sin(seq(0, 4*pi, length.out = 1000))
-#' resampled <- resample_signal(sig, target_length = 1200)
-#' length(resampled)  # 1200
+#' # ACIER: 16000 -> 18750 (GCD=250, 75/64, filter=3001 taps)
+#' gait <- rnorm(16000)
+#' y <- resample_signal(gait, 18750, debug = TRUE)
 #' 
-#' # With debug output
-#' resampled <- resample_signal(sig, target_length = 1050, debug = TRUE)
-#' 
-#' # Check what method was used
-#' attr(resampled, "method_used")
-#' attr(resampled, "backend")
-#' 
-#' # ACIER standard: resample to 18750 samples
-#' gait_signal <- rnorm(16000)  # Simulated gait data
-#' resampled <- resample_signal(gait_signal, target_length = 18750)
-#' 
-#' @seealso 
-#' \code{\link[gsignal]{resample}}, \code{\link{check_resampling_ratio}}
+#' # Batch: same ratio reuses cached filter
+#' y_x <- resample_signal(gait_x, 18750)  # designs filter
+#' y_y <- resample_signal(gait_y, 18750)  # uses cached filter
+#' y_z <- resample_signal(gait_z, 18750)  # uses cached filter
 #' 
 #' @export
 resample_signal <- function(signal, 
                             target_length,
                             method = c("auto", "direct", "two_stage"),
-                            complexity_threshold = 100,
-                            intermediate_factor = 1.5,
-                            debug = FALSE,
-                            use_fallback = TRUE) {
+                            complexity_threshold = 50000,
+                            n = 20,
+                            beta = 5,
+                            debug = TRUE,
+                            use_fallback = TRUE,
+                            log_file = NULL,
+                            log_label = "") {
   
-  # Match method argument
   method <- match.arg(method)
+  t_start <- proc.time()["elapsed"]
+  
+  # Log header for this call
+  .resample_log_sep(log_file, sprintf("resample_signal [%s] @ %s",
+                                       log_label, format(Sys.time(), "%H:%M:%S")))
+  .resample_log(log_file, "Parameters: target=%d, method=%s, threshold=%d, n=%d, beta=%.1f",
+                as.integer(target_length), method, complexity_threshold, n, beta)
   
   # -------------------------------------------------------------------------
-  # Determine which backend to use
+  # Determine backend
   # -------------------------------------------------------------------------
   backend <- NULL
-  
   if (HAS_GSIGNAL_PKG) {
     backend <- "gsignal"
   } else if (HAS_SIGNAL_PKG && use_fallback) {
     backend <- "signal"
-    if (debug) {
-      message("Note: 'gsignal' not available. Using 'signal' package (less MATLAB-compatible).")
-      message("      For best results: install.packages('gsignal')")
-    }
+    if (debug) message("  Note: gsignal not available, using signal package")
   } else if (use_fallback) {
     backend <- "spline"
-    if (debug) {
-      message("Warning: No signal processing package available.")
-      message("         Using spline interpolation (NOT recommended for dynamical analysis).")
-      message("         Install gsignal: install.packages('gsignal')")
-    }
+    if (debug) message("  Warning: No signal processing package, using spline")
   } else {
-    stop("Package 'gsignal' is required for MATLAB-compatible resampling.\n",
-         "Install with: install.packages('gsignal')\n",
-         "Or set use_fallback = TRUE to use alternative methods.")
+    stop("Package 'gsignal' is required. Install: install.packages('gsignal')")
   }
+  
+  .resample_log(log_file, "Backend: %s", backend)
   
   # -------------------------------------------------------------------------
   # Input validation
@@ -323,164 +634,185 @@ resample_signal <- function(signal,
     stop("'signal' must be a numeric vector with at least 2 elements")
   }
   if (any(!is.finite(signal))) {
-    warning("Signal contains non-finite values (NA/NaN/Inf). These may cause issues.")
+    warning("Signal contains non-finite values (NA/NaN/Inf).")
   }
   if (!is.numeric(target_length) || length(target_length) != 1 || target_length < 1) {
     stop("'target_length' must be a single positive integer")
-  }
-  if (!is.numeric(complexity_threshold) || complexity_threshold <= 0) {
-    stop("'complexity_threshold' must be a positive number")
-  }
-  if (!is.numeric(intermediate_factor) || intermediate_factor <= 1) {
-    stop("'intermediate_factor' must be greater than 1")
   }
   
   original_length <- length(signal)
   target_length <- as.integer(target_length)
   
+  # Log input signal statistics
+  .resample_log_signal(log_file, "INPUT", signal)
+  
   # -------------------------------------------------------------------------
   # Edge case: no resampling needed
   # -------------------------------------------------------------------------
   if (original_length == target_length) {
-    if (debug) message("No resampling needed: original length equals target length")
+    if (debug) message("  No resampling needed (lengths equal)")
+    .resample_log(log_file, "No resampling needed (original == target == %d)", original_length)
     result <- signal
     attr(result, "method_used") <- "none"
     attr(result, "original_length") <- original_length
-    attr(result, "filter_phases") <- 1
+    attr(result, "filter_phases") <- 1L
+    attr(result, "filter_length") <- 1L
     attr(result, "was_problematic") <- FALSE
     attr(result, "backend") <- "none"
+    attr(result, "elapsed_sec") <- 0
     return(result)
   }
   
   # -------------------------------------------------------------------------
-  # Check if ratio is problematic
+  # Analyze ratio
   # -------------------------------------------------------------------------
-  ratio_check <- check_resampling_ratio(original_length, target_length, complexity_threshold)
+  ratio_check <- check_resampling_ratio(original_length, target_length, 
+                                        complexity_threshold)
+  
+  .resample_log(log_file, "Ratio analysis:")
+  .resample_log(log_file, "  %d -> %d, ratio=%.8f", original_length, target_length, ratio_check$ratio)
+  .resample_log(log_file, "  GCD=%d, reduced p/q=%d/%d",
+                ratio_check$gcd, ratio_check$p_reduced, ratio_check$q_reduced)
+  .resample_log(log_file, "  filter_phases=%d, filter_length=%d",
+                ratio_check$filter_phases, ratio_check$filter_length)
+  .resample_log(log_file, "  upfirdn_buffer=%.0f (%.1f MB), problematic=%s",
+                ratio_check$upfirdn_buffer, ratio_check$upfirdn_buffer_MB,
+                ratio_check$is_problematic)
   
   if (debug) {
-    message(sprintf("Resampling: %d -> %d (ratio = %.4f)",
+    message(sprintf("  Resampling: %d -> %d (ratio = %.6f)",
                     original_length, target_length, ratio_check$ratio))
-    message(sprintf("  Backend: %s (polyphase = %s)", 
-                    backend, ifelse(backend == "gsignal", "yes", "no")))
-    message(sprintf("  GCD = %d, Reduced = %d/%d",
+    message(sprintf("  Backend: %s (direct upfirdn) | n=%d, beta=%.1f",
+                    backend, n, beta))
+    message(sprintf("  GCD = %d, reduced = %d/%d",
                     ratio_check$gcd, ratio_check$p_reduced, ratio_check$q_reduced))
-    message(sprintf("  Filter phases = %d (threshold = %d)",
-                    ratio_check$filter_phases, complexity_threshold))
-    message(sprintf("  Problematic = %s", ratio_check$is_problematic))
+    message(sprintf("  Filter: %d phases, %d taps, buffer = %.1f MB",
+                    ratio_check$filter_phases, ratio_check$filter_length,
+                    ratio_check$upfirdn_buffer_MB))
+    # Only show "problematic" diagnostic when method="auto" (where it matters)
+    if (method == "auto" && ratio_check$is_problematic) {
+      message(sprintf("  [!] Ratio flagged as problematic (%d phases > %d threshold)",
+                      ratio_check$filter_phases, complexity_threshold))
+    }
   }
   
   # -------------------------------------------------------------------------
-  # Decide on method (direct vs two-stage)
+  # Decide method
   # -------------------------------------------------------------------------
   use_two_stage <- switch(method,
                           "auto" = ratio_check$is_problematic,
                           "two_stage" = TRUE,
                           "direct" = FALSE)
   
+  .resample_log(log_file, "Method decision: requested=%s, use_two_stage=%s", method, use_two_stage)
+  
   # -------------------------------------------------------------------------
-  # Helper: check if gsignal::resample(x, p, q) would overflow R's 32-bit
-  # integer limit, causing "cannot allocate vector of negative length"
-  #
-  # ROOT CAUSE :
-  #   gsignal::resample does NOT reduce p/q by their GCD before calling
-  #   upfirdn(). Internally, upfirdn allocates a buffer of size:
-  #       (length(x) - 1) * p + length(h)
-  #   where h is the FIR filter (length ~ 2*10*max(p,q) + 1).
-  #   R vectors are limited to 2^31 - 1 elements (32-bit indexing).
-  #   When (N-1)*p exceeds this, the integer wraps to negative, and R
-  #   attempts to allocate a negative-length vector -> crash.
-  #
-  # EXAMPLE :
-  #   SF = 1.668 Hz -> truncation_index = 38370
-  #   Two-stage Stage 1: resample(x, p=57555, q=38370)
-  #     upfirdn buffer = (38370-1)*57555 = 2,209 M > 2^31 = 2,147 M -> CRASH
-  #   Direct: resample(x, p=18750, q=38370)
-  #     upfirdn buffer = (38370-1)*18750 = 719 M < 2^31 -> OK
-  #
-  # The two-stage workaround creates a LARGER p than direct, making
-  # overflow MORE likely. The fix detects this and falls back to direct.
+  # Overflow guard: buffer must fit in R's int32 index limit
   # -------------------------------------------------------------------------
   .would_overflow <- function(sig_len, p, q) {
-    # Check unreduced p (as gsignal actually passes to upfirdn)
-    # Conservative: check (sig_len - 1) * p (dominant term; filter length
-    # adds ~max(p,q)*20 which is negligible relative to the product)
-    return(as.double(sig_len - 1) * as.double(p) > .Machine$integer.max)
+    g <- gcd(p, q)
+    p_red <- as.double(p / g)
+    pqmax <- max(p_red, as.double(q / g))
+    filter_len <- 2.0 * n * pqmax + 1.0
+    buffer <- as.double(sig_len - 1) * p_red + filter_len
+    return(buffer > .Machine$integer.max)
   }
   
   # -------------------------------------------------------------------------
-  # Helper function for actual resampling
+  # Helper: perform one resampling operation
   # -------------------------------------------------------------------------
-  do_resample <- function(x, target_len, orig_len = length(x)) {
+  do_resample <- function(x, target_len, orig_len = length(x), label = "") {
+    .resample_log(log_file, "  >> do_resample [%s]: len=%d -> %d", label, orig_len, target_len)
     result <- switch(backend,
-                     "gsignal" = .resample_polyphase(x, target_len, orig_len),
+                     "gsignal" = .resample_matlab(x, target_len, orig_len,
+                                                   n = n, beta = beta,
+                                                   debug = debug,
+                                                   log_file = log_file),
                      "signal" = .resample_bandlimited(x, target_len, orig_len),
                      "spline" = .resample_spline(x, target_len))
     return(as.numeric(result))
   }
   
   # -------------------------------------------------------------------------
-  # Safety: if two-stage would cause integer overflow, try alternatives
-  # This is the key fix for cases where
-  # the "problematic ratio" workaround creates worse overflow than direct.
+  # Smart two-stage check (P4): only use if Stage 2 is actually better
+  # -------------------------------------------------------------------------
+  intermediate_length <- as.integer(floor(original_length * 2 / 3))
+  
+  if (use_two_stage) {
+    stage2_check <- check_resampling_ratio(intermediate_length, target_length,
+                                           complexity_threshold)
+    if (stage2_check$filter_phases >= ratio_check$filter_phases) {
+      if (debug) {
+        message(sprintf("  Two-stage rejected: Stage 2 = %d phases >= direct %d",
+                        stage2_check$filter_phases, ratio_check$filter_phases))
+      }
+      .resample_log(log_file, "  Two-stage REJECTED: stage2 phases=%d >= direct %d",
+                    stage2_check$filter_phases, ratio_check$filter_phases)
+      use_two_stage <- FALSE
+    } else if (debug) {
+      message(sprintf("  Two-stage approved: Stage 2 = %d phases (vs direct %d)",
+                      stage2_check$filter_phases, ratio_check$filter_phases))
+    }
+    if (use_two_stage) {
+      .resample_log(log_file, "  Two-stage APPROVED: stage2 phases=%d < direct %d",
+                    stage2_check$filter_phases, ratio_check$filter_phases)
+    }
+  }
+  
+  # -------------------------------------------------------------------------
+  # Overflow safety
   # -------------------------------------------------------------------------
   if (use_two_stage && backend %in% c("gsignal", "signal")) {
-    intermediate_length_check <- as.integer(ceiling(original_length * intermediate_factor))
-    if (.would_overflow(original_length, intermediate_length_check, original_length)) {
-      # Two-stage Stage 1 would overflow -> try direct instead
+    if (.would_overflow(intermediate_length, target_length, intermediate_length)) {
       if (!.would_overflow(original_length, target_length, original_length)) {
-        if (debug) {
-          ts_buf <- as.double(original_length - 1) * as.double(intermediate_length_check)
-          dr_buf <- as.double(original_length - 1) * as.double(target_length)
-          message(sprintf("  [!] Two-stage Stage 1 would overflow R integer limit:"))
-          message(sprintf("      upfirdn buffer = (N-1)*p = %.0f > 2^31 = %.0f", 
-                          ts_buf, .Machine$integer.max))
-          message(sprintf("      Falling back to direct resampling (buffer = %.0f, safe)", dr_buf))
-        }
+        if (debug) message("  [!] Stage 2 overflow -> direct")
+        .resample_log(log_file, "  [!] Stage 2 overflow -> falling back to direct")
         use_two_stage <- FALSE
       } else {
-        # Both would overflow -> fall back to spline
-        if (debug) {
-          message("  [!] Both two-stage and direct would overflow R integer limit")
-          message("      Falling back to spline interpolation")
-        }
+        if (debug) message("  [!] Both overflow -> spline")
+        .resample_log(log_file, "  [!] Both stages overflow -> falling back to spline")
         backend <- "spline"
         use_two_stage <- FALSE
       }
     }
   }
+  if (!use_two_stage && backend %in% c("gsignal", "signal")) {
+    if (.would_overflow(original_length, target_length, original_length)) {
+      if (debug) message("  [!] Direct overflow -> spline")
+      backend <- "spline"
+    }
+  }
   
   # -------------------------------------------------------------------------
-  # Perform resampling (with tryCatch for safety)
+  # Execute resampling
   # -------------------------------------------------------------------------
   if (use_two_stage) {
-    if (debug) message("  Using two-stage resampling")
-    
-    # Stage 1: Upsample to intermediate length
-    intermediate_length <- as.integer(ceiling(original_length * intermediate_factor))
-    
     if (debug) {
-      message(sprintf("  Stage 1: %d -> %d (factor = %.2f)",
-                      original_length, intermediate_length, intermediate_factor))
+      message("  Method: TWO-STAGE (shrink x2/3, matching MATLAB)")
+      message(sprintf("  Stage 1: %d -> %d (x 2/3)",
+                      original_length, intermediate_length))
     }
+    .resample_log(log_file, "EXECUTING: TWO-STAGE")
+    .resample_log(log_file, "  Stage 1: %d -> %d (x 2/3)", original_length, intermediate_length)
     
     result <- tryCatch({
-      temp <- do_resample(signal, intermediate_length, original_length)
-      
-      # Stage 2: Resample to target
+      temp <- do_resample(signal, intermediate_length, original_length,
+                          label = "Stage 1")
       if (debug) {
-        diag_stage2 <- check_resampling_ratio(length(temp), target_length, complexity_threshold)
-        message(sprintf("  Stage 2: %d -> %d (phases = %d)",
-                        length(temp), target_length, diag_stage2$filter_phases))
+        s2 <- check_resampling_ratio(length(temp), target_length,
+                                     complexity_threshold)
+        message(sprintf("  Stage 2: %d -> %d (%d/%d, %d phases, %d taps)",
+                        length(temp), target_length,
+                        s2$p_reduced, s2$q_reduced,
+                        s2$filter_phases, s2$filter_length))
       }
-      
-      do_resample(temp, target_length, length(temp))
+      do_resample(temp, target_length, length(temp), label = "Stage 2")
     }, error = function(e) {
-      # Two-stage failed (e.g. memory/overflow) -> try direct, then spline
-      if (debug) message(sprintf("  Two-stage failed (%s); trying direct...", e$message))
+      if (debug) message(sprintf("  Two-stage failed: %s; trying direct", e$message))
       tryCatch(
         do_resample(signal, target_length, original_length),
         error = function(e2) {
-          if (debug) message(sprintf("  Direct also failed (%s); using spline fallback", e2$message))
+          if (debug) message(sprintf("  Direct failed: %s; spline fallback", e2$message))
           .resample_spline(signal, target_length)
         }
       )
@@ -488,11 +820,12 @@ resample_signal <- function(signal,
     method_used <- "two_stage"
     
   } else {
-    if (debug) message("  Using direct resampling")
+    if (debug) message("  Method: DIRECT")
+    .resample_log(log_file, "EXECUTING: DIRECT (%d -> %d)", original_length, target_length)
     result <- tryCatch(
-      do_resample(signal, target_length, original_length),
+      do_resample(signal, target_length, original_length, label = "Direct"),
       error = function(e) {
-        if (debug) message(sprintf("  Direct failed (%s); using spline fallback", e$message))
+        if (debug) message(sprintf("  Direct failed: %s; spline fallback", e$message))
         .resample_spline(signal, target_length)
       }
     )
@@ -500,29 +833,36 @@ resample_signal <- function(signal,
   }
   
   # -------------------------------------------------------------------------
-  # Ensure exact length (handle potential rounding errors)
+  # Ensure exact output length (handle ceil rounding)
   # -------------------------------------------------------------------------
   if (length(result) != target_length) {
-    if (debug) {
-      message(sprintf("  Length adjustment: %d -> %d", length(result), target_length))
-    }
+    if (debug) message(sprintf("  Length trim: %d -> %d", length(result), target_length))
+    .resample_log(log_file, "Length trim: %d -> %d", length(result), target_length)
     if (length(result) > target_length) {
       result <- result[1:target_length]
     } else {
-      # Pad with last value if too short (rare edge case)
       result <- c(result, rep(tail(result, 1), target_length - length(result)))
     }
   }
   
   # -------------------------------------------------------------------------
-  # Attach metadata as attributes
+  # Metadata
   # -------------------------------------------------------------------------
+  elapsed <- as.numeric(proc.time()["elapsed"] - t_start)
+  if (debug) message(sprintf("  TOTAL: %.4f sec", elapsed))
+  
+  # Final log summary
+  .resample_log(log_file, "RESULT: method=%s, backend=%s, length=%d, elapsed=%.4f sec",
+                method_used, backend, length(result), elapsed)
+  .resample_log_signal(log_file, "FINAL OUTPUT", result)
+  
   attr(result, "method_used") <- method_used
   attr(result, "original_length") <- original_length
   attr(result, "filter_phases") <- ratio_check$filter_phases
+  attr(result, "filter_length") <- ratio_check$filter_length
   attr(result, "was_problematic") <- ratio_check$is_problematic
   attr(result, "backend") <- backend
+  attr(result, "elapsed_sec") <- elapsed
   
   return(result)
 }
-

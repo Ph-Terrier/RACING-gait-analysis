@@ -24,7 +24,7 @@
 #' **Long-term Divergence Exponent (ACI - Attractor Complexity Index)**
 #' - Originally designed as stability measure (2000-2013), reinterpreted as COMPLEXITY (2016+)
 #' - Computed over 5-12 strides (samples 750 to 1800)
-#' - Correlates strongly with DFA scaling exponents (r ≈ 0.7-0.8)
+#' - Correlates strongly with DFA scaling exponents (r ~= 0.7-0.8)
 #' - Reflects stride-to-stride fluctuation patterns and gait automaticity
 #' - Lower values during metronome walking indicate reduced automaticity
 #' - Not a local stability measure (conceptually distinct from LDS)
@@ -93,7 +93,7 @@
 #' - Default fitting range: indices 1 to 75 = time 0 to ~0.493 strides
 #' 
 #' The slope represents the average exponential divergence rate:
-#' d(t) = d0 * exp(lambda * t), so log(d(t)) ≈ log(d0) + lambda * t
+#' d(t) = d0 * exp(lambda * t), so log(d(t)) ~= log(d0) + lambda * t
 #' 
 #' @examples
 #' result <- rosenstein_divergence(gait_signal, m=5, tau=10, max_iter=1800)
@@ -219,7 +219,7 @@ fit_long_term_divergence <- function(divergence,
   end_idx <- stride_range[2] * samples_per_stride
   
   # MATLAB uses 1-based indexing, but the time starts at 0
-  # Index 750 corresponds to time = 749/150 ≈ 4.99 strides
+  # Index 750 corresponds to time = 749/150 ~= 4.99 strides
   # We need to match MATLAB exactly: indices from start_idx to end_idx
   # In R, this is the same as MATLAB (1-based)
   
@@ -473,8 +473,8 @@ plot_divergence_fits <- function(divergence,
 #' 
 #' # 3. Detailed analysis with fit quality metrics
 #' detailed <- fit_divergence_exponents(result$divergence, return_fits = TRUE)
-#' cat("LDS R² (should be > 0.95):", detailed$fits$LDS$r_squared, "\n")
-#' cat("ACI R² (should be > 0.90):", detailed$fits$ACI$r_squared, "\n")
+#' cat("LDS R^2 (should be > 0.95):", detailed$fits$LDS$r_squared, "\n")
+#' cat("ACI R^2 (should be > 0.90):", detailed$fits$ACI$r_squared, "\n")
 #' 
 #' # 4. Custom ranges for sensitivity analysis
 #' custom <- fit_divergence_exponents(

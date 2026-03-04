@@ -38,7 +38,7 @@
 #' 
 #' - Constant tilt: Accelerometer maintains relatively constant orientation
 #' - Sagittal plane alignment: AP axis lies in the sagittal plane
-#' - Zero mean dynamic acceleration: Net velocity change ≈ 0 over walking trial
+#' - Zero mean dynamic acceleration: Net velocity change ~ 0 over walking trial
 #' - Small to moderate tilts: Works best for typical walking postures
 #' - No significant axial rotation: Rotation about vertical axis has minimal effect
 #'
@@ -55,9 +55,9 @@
 #'
 #' @return If `return_diagnostics = FALSE` (default), returns a list with:
 #' \describe{
-#'   \item{ap}{Corrected AP acceleration in horizontal plane (mean ≈ 0)}
-#'   \item{v}{Corrected vertical acceleration with gravity removed (mean ≈ 0)}
-#'   \item{ml}{Corrected ML acceleration in horizontal plane (mean ≈ 0)}
+#'   \item{ap}{Corrected AP acceleration in horizontal plane (mean ~ 0)}
+#'   \item{v}{Corrected vertical acceleration with gravity removed (mean ~ 0)}
+#'   \item{ml}{Corrected ML acceleration in horizontal plane (mean ~ 0)}
 #' }
 #'
 #' If `return_diagnostics = TRUE`, additionally includes:
@@ -74,7 +74,7 @@
 #' }
 #'
 #' @examples
-#' # Simulate tilted accelerometer data (10° forward tilt, 5° right tilt)
+#' # Simulate tilted accelerometer data (10 deg forward tilt, 5 deg right tilt)
 #' set.seed(42)
 #' n <- 5000
 #' theta_ap_true <- 10 * pi / 180  # 10 degrees
@@ -93,8 +93,8 @@
 #'
 #' # With diagnostics
 #' result_diag <- tilt_correction(acc_ap, acc_v, acc_ml, return_diagnostics = TRUE)
-#' print(result_diag$theta_ap_deg)  # Should be close to 10°
-#' print(result_diag$theta_ml_deg)  # Should be close to 5°
+#' print(result_diag$theta_ap_deg)  # Should be close to 10 deg
+#' print(result_diag$theta_ml_deg)  # Should be close to 5 deg
 #'
 #' @references
 #' Moe-Nilssen, R. (1998). A new method for evaluating motor control in gait 
@@ -148,8 +148,8 @@ tilt_correction <- function(acc_ap, acc_v, acc_ml,
   # ============================================================================
   
   # The Moe-Nilssen algorithm assumes vertical axis points UPWARD
-  # When standing still: mean(V) ≈ +1g
-  # If sensor is mounted upside down: mean(V) ≈ -1g
+  # When standing still: mean(V) ~ +1g
+  # If sensor is mounted upside down: mean(V) ~ -1g
   
   orientation_detected <- "upward"
   orientation_corrected <- FALSE
@@ -181,8 +181,8 @@ tilt_correction <- function(acc_ap, acc_v, acc_ml,
   # Key insight: Over a walking trial, the mean dynamic acceleration approaches
   # zero (cyclical movement). Therefore, the mean measured acceleration equals
   # the static gravity component:
-  #   sin(θ_ap) ≈ mean(a_ap)
-  #   sin(θ_ml) ≈ mean(a_ml)
+  #   sin(theta_ap) ~ mean(a_ap)
+  #   sin(theta_ml) ~ mean(a_ml)
   
   sin_theta_ap <- mean(acc_ap, na.rm = TRUE)
   sin_theta_ml <- mean(acc_ml, na.rm = TRUE)
@@ -216,7 +216,7 @@ tilt_correction <- function(acc_ap, acc_v, acc_ml,
   sin_theta_ml <- sin(theta_ml)
   
   if (verbose) {
-    message(sprintf("Estimated tilt angles: AP = %.2f°, ML = %.2f°",
+    message(sprintf("Estimated tilt angles: AP = %.2f deg, ML = %.2f deg",
                     theta_ap * 180 / pi,
                     theta_ml * 180 / pi))
   }
@@ -229,11 +229,11 @@ tilt_correction <- function(acc_ap, acc_v, acc_ml,
   # The rotation is applied to the AP and V components.
   #
   # Rotation matrix:
-  # [a_A  ]   [cos(θ_ap)  -sin(θ_ap)] [a_ap]
-  # [a_v' ] = [sin(θ_ap)   cos(θ_ap)] [a_v ]
+  # [a_A  ]   [cos(theta_ap)  -sin(theta_ap)] [a_ap]
+  # [a_v' ] = [sin(theta_ap)   cos(theta_ap)] [a_v ]
   #
-  # Equation A1: a_A = a_ap · cos(θ_ap) - a_v · sin(θ_ap)
-  # Equation A2: a_v' = a_ap · sin(θ_ap) + a_v · cos(θ_ap)
+  # Equation A1: a_A = a_ap * cos(theta_ap) - a_v * sin(theta_ap)
+  # Equation A2: a_v' = a_ap * sin(theta_ap) + a_v * cos(theta_ap)
   
   acc_A <- acc_ap * cos_theta_ap - acc_v * sin_theta_ap
   acc_v_provisional <- acc_ap * sin_theta_ap + acc_v * cos_theta_ap
@@ -246,12 +246,12 @@ tilt_correction <- function(acc_ap, acc_v, acc_ml,
   # The rotation is applied to the ML and provisional V components.
   #
   # Rotation matrix:
-  # [a_M]   [cos(θ_ml)  -sin(θ_ml)] [a_ml ]
-  # [a_V] = [sin(θ_ml)   cos(θ_ml)] [a_v' ] - [0]
+  # [a_M]   [cos(theta_ml)  -sin(theta_ml)] [a_ml ]
+  # [a_V] = [sin(theta_ml)   cos(theta_ml)] [a_v' ] - [0]
   #                                           [1]
   #
-  # Equation A3: a_M = a_ml · cos(θ_ml) - a_v' · sin(θ_ml)
-  # Equation A4: a_V = a_ml · sin(θ_ml) + a_v' · cos(θ_ml) - 1
+  # Equation A3: a_M = a_ml * cos(theta_ml) - a_v' * sin(theta_ml)
+  # Equation A4: a_V = a_ml * sin(theta_ml) + a_v' * cos(theta_ml) - 1
   #
   # Note: The -1 removes the 1g gravity component from the final vertical
   
@@ -382,7 +382,7 @@ tilt_correction_batch <- function(data, col_ap, col_v, col_ml, ...) {
 #' @param mean_tolerance Maximum acceptable mean acceleration (in g) for
 #'   quality check. Default is 0.01g.
 #' @param max_tilt_deg Maximum acceptable tilt angle (in degrees) for
-#'   warning. Default is 30°.
+#'   warning. Default is 30 deg.
 #'
 #' @return A list with validation results:
 #' \describe{
@@ -433,7 +433,7 @@ validate_tilt_correction <- function(corrected_data,
   
   if (!tilt_check) {
     messages <- c(messages,
-                  sprintf("Extreme tilt detected: AP=%.1f°, ML=%.1f° (max=%.1f°)",
+                  sprintf("Extreme tilt detected: AP=%.1f deg, ML=%.1f deg (max=%.1f deg)",
                           corrected_data$theta_ap_deg,
                           corrected_data$theta_ml_deg,
                           max_tilt_deg))
@@ -468,7 +468,7 @@ if (FALSE) {  # Don't run automatically
   set.seed(42)
   n <- 10000
   
-  # True tilt: 10° forward, 5° right
+  # True tilt: 10 deg forward, 5 deg right
   theta_ap_true <- 10 * pi / 180
   theta_ml_true <- 5 * pi / 180
   
@@ -483,8 +483,8 @@ if (FALSE) {  # Don't run automatically
                             verbose = TRUE)
   
   cat("\nEstimated tilt angles:\n")
-  cat(sprintf("  AP: %.2f° (true: %.2f°)\n", result$theta_ap_deg, 10))
-  cat(sprintf("  ML: %.2f° (true: %.2f°)\n", result$theta_ml_deg, 5))
+  cat(sprintf("  AP: %.2f deg (true: %.2f deg)\n", result$theta_ap_deg, 10))
+  cat(sprintf("  ML: %.2f deg (true: %.2f deg)\n", result$theta_ml_deg, 5))
   
   cat("\nOutput means (should be ~0):\n")
   print(result$mean_output)
@@ -524,8 +524,8 @@ if (FALSE) {  # Don't run automatically
                                   verbose = TRUE)
   
   cat("\nEstimated tilt angles (should be ~0):\n")
-  cat(sprintf("  AP: %.2f°\n", result_ideal$theta_ap_deg))
-  cat(sprintf("  ML: %.2f°\n", result_ideal$theta_ml_deg))
+  cat(sprintf("  AP: %.2f deg\n", result_ideal$theta_ap_deg))
+  cat(sprintf("  ML: %.2f deg\n", result_ideal$theta_ml_deg))
   
   # ---------------------------------------------------------------------------
   # Test 4: Validation function
