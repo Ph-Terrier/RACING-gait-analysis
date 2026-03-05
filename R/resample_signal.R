@@ -7,8 +7,21 @@
 #' 
 #' @author Philippe Terrier / ORD 2025 Project (RACING)
 #' @date March 2026
-#' @version 3.5
+#' @version 3.6
 #' @license MIT
+#'
+#' KEY FIX (v3.6): Stage 1 of two-stage resampling now passes the ratio
+#' (p=2, q=3) directly to .resample_matlab(), matching MATLAB's
+#' resample(x, 2, 3, 20). Previous versions passed computed *lengths*
+#' (original_length, intermediate_length) which, when GCD = 1, produced
+#' a multi-million-tap filter and an upfirdn buffer exceeding R's 2^31
+#' integer index limit ("invalid 'times' argument" in rep()).
+#' Indoor data (250 steps, ~37k samples) was unaffected because the
+#' buffer stayed below 2^31. Outdoor data (500 steps, ~75k samples)
+#' triggered the overflow. The overflow guard is also extended to check
+#' Stage 1 (previously only Stage 2 was checked). A dedicated helper
+#' do_resample_stage1() encapsulates the ratio-based Stage 1 call for
+#' all backends.
 #'
 #' KEY FIX (v3.5): Raised auto-mode threshold from 100 to 50000 filter phases.
 #' The old threshold flagged 99% of ACIER signals as "problematic" even though
@@ -734,9 +747,44 @@ resample_signal <- function(signal,
   }
   
   # -------------------------------------------------------------------------
+  # Helper: Stage 1 shrink-to-2/3 using RATIO, not lengths  (v3.6 fix)
+  # -------------------------------------------------------------------------
+  # MATLAB (Main_results_new_v2.m, line 683):
+  #   provwalk_norm_A = resample(provwalk_norm_A, 2, 3, 20);
+  # This passes p=2, q=3 directly. GCD(2,3)=1, so the reduced filter has
+  # max(2,3)=3 phases, order=2*20*3=120, 121 taps -- trivially small.
+  #
+  # Previous R code passed (intermediate_length, original_length) as
+  # (p, q). When original_length is not divisible by 3, GCD can be 1,
+  # giving p_red = intermediate_length (e.g., 50196) and a filter with
+  # millions of taps, overflowing R's 2^31 integer index limit.
+  #
+  # This helper calls each backend with the ratio directly:
+  #   gsignal: .resample_matlab(x, 2, 3, ...)  -> upfirdn with 121-tap filter
+  #   signal:  signal::resample(x, 2, 3)       -> same ratio-based call
+  #   spline:  .resample_spline(x, ceil(N*2/3)) -> length-based (no filter)
+  # -------------------------------------------------------------------------
+  do_resample_stage1 <- function(x, label = "Stage 1 (2/3)") {
+    Lx <- length(x)
+    expected_len <- ceiling(Lx * 2 / 3)
+    .resample_log(log_file, "  >> do_resample_stage1 [%s]: len=%d -> ~%d (ratio 2/3)",
+                  label, Lx, expected_len)
+    result <- switch(backend,
+                     "gsignal" = .resample_matlab(x, 2L, 3L,
+                                                   n = n, beta = beta,
+                                                   debug = debug,
+                                                   log_file = log_file),
+                     "signal" = .resample_bandlimited(x, 2L, 3L),
+                     "spline" = .resample_spline(x, expected_len))
+    return(as.numeric(result))
+  }
+  
+  # -------------------------------------------------------------------------
   # Smart two-stage check (P4): only use if Stage 2 is actually better
   # -------------------------------------------------------------------------
-  intermediate_length <- as.integer(floor(original_length * 2 / 3))
+  # v3.6: use ceiling() to match MATLAB's resample(x,2,3) output length
+  # which is ceil(Lx * 2/3). Previous floor() could be off by 1.
+  intermediate_length <- as.integer(ceiling(original_length * 2 / 3))
   
   if (use_two_stage) {
     stage2_check <- check_resampling_ratio(intermediate_length, target_length,
@@ -762,6 +810,8 @@ resample_signal <- function(signal,
   # -------------------------------------------------------------------------
   # Overflow safety
   # -------------------------------------------------------------------------
+  # v3.6: Stage 1 uses ratio (2,3) directly -> 121-tap filter, trivially
+  # safe for any signal length. Only Stage 2 needs overflow checking.
   if (use_two_stage && backend %in% c("gsignal", "signal")) {
     if (.would_overflow(intermediate_length, target_length, intermediate_length)) {
       if (!.would_overflow(original_length, target_length, original_length)) {
@@ -788,19 +838,25 @@ resample_signal <- function(signal,
   # -------------------------------------------------------------------------
   if (use_two_stage) {
     if (debug) {
-      message("  Method: TWO-STAGE (shrink x2/3, matching MATLAB)")
-      message(sprintf("  Stage 1: %d -> %d (x 2/3)",
+      message("  Method: TWO-STAGE (shrink x2/3, matching MATLAB resample(x,2,3,20))")
+      message(sprintf("  Stage 1: %d -> ~%d (ratio 2/3, 121-tap filter)",
                       original_length, intermediate_length))
     }
-    .resample_log(log_file, "EXECUTING: TWO-STAGE")
-    .resample_log(log_file, "  Stage 1: %d -> %d (x 2/3)", original_length, intermediate_length)
+    .resample_log(log_file, "EXECUTING: TWO-STAGE (v3.6 ratio-based Stage 1)")
+    .resample_log(log_file, "  Stage 1: %d -> ~%d (ratio 2/3)", original_length, intermediate_length)
     
     result <- tryCatch({
-      temp <- do_resample(signal, intermediate_length, original_length,
-                          label = "Stage 1")
+      # v3.6 fix: Stage 1 uses ratio (2, 3) directly, not computed lengths.
+      # This matches MATLAB: resample(x, 2, 3, 20)
+      # The ratio approach guarantees a 121-tap filter (3 phases) regardless
+      # of signal length, avoiding the catastrophic GCD=1 case that produced
+      # multi-million-tap filters and overflowed R's 2^31 integer limit.
+      temp <- do_resample_stage1(signal, label = "Stage 1 (2/3)")
       if (debug) {
         s2 <- check_resampling_ratio(length(temp), target_length,
                                      complexity_threshold)
+        message(sprintf("  Stage 1 output: %d samples (expected ~%d)",
+                        length(temp), intermediate_length))
         message(sprintf("  Stage 2: %d -> %d (%d/%d, %d phases, %d taps)",
                         length(temp), target_length,
                         s2$p_reduced, s2$q_reduced,
