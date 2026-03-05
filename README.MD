@@ -228,7 +228,7 @@ To exactly reproduce the ACIER study results:
 
 1. Download the ACIER dataset from Zenodo: [https://doi.org/10.5281/zenodo.10148824](https://doi.org/10.5281/zenodo.10148824)
 2. Use the pre-configured `config/RACING_config_template.xlsx` (set `sampling_freq = 256`)
-3. Run the batch pipeline on the indoor or outdoor condition folders
+3. Run the batch pipeline on the young and / or older group
 
 A reproducible CodeOcean capsule demonstrating end-to-end processing of the
 outdoor older adult condition is available at: [NOT AVAILABLE YET]
@@ -250,7 +250,7 @@ For the underlying ACIER dataset and original MATLAB algorithms, please cite:
 This project is licensed under the MIT License -- see [LICENSE](LICENSE) for details.
 
 The original MATLAB algorithms were adapted from scripts available on MATLAB Central
-under a BSD license, which is compatible with MIT.
+under a BSD license.
 
 ---
 
@@ -269,4 +269,5 @@ RACING was developed as part of the ORD 2025 grant (Open Research Data, HES-SO)
 at HE-Arc Sante Neuchatel. The project objective is to make validated nonlinear gait
 analysis methods freely accessible to international researchers following FAIR principles,
 enabling reproducibility of the ACIER findings and facilitating new clinical research
+
 on gait stability and fall risk in older adults.
