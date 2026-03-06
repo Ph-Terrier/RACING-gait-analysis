@@ -24,6 +24,8 @@
 #   axes (AP, V, ML, norm) are independent and processed in parallel across
 #   cluster workers using the parallel package. A PSOCK cluster is created
 #   at startup (default: 4 workers, one per axis) and reused for all files.
+#   Analysis functions are sourced on workers via clusterEvalQ; config
+#   parameters and per-file signals are exported via clusterExport.
 #   Falls back to sequential lapply when parallel setup fails or on
 #   single-core systems.
 #
@@ -198,6 +200,11 @@ tryCatch({
     })
 
     use_parallel <- TRUE
+
+    # Export config parameters to workers (constant across files).
+    # These must be exported explicitly because PSOCK workers are
+    # separate R processes and cannot access the parent environment.
+    # (resampled_signals changes per file and is exported in the loop.)
     cat(sprintf("\n  Parallel:     %d workers (PSOCK cluster, %d cores detected)\n",
                 n_workers, n_cores))
   } else {
@@ -273,9 +280,9 @@ batch_start <- Sys.time()
 CHECKPOINT_INTERVAL <- 50L   # Save CSV checkpoint every N files
 
 # -- Export analysis parameters to parallel workers --
-# These scalar values are captured in the worker function closure and sent
-# to each worker via parLapply serialization. We store them with a .cfg_
-# prefix in the batch script scope to keep them accessible to the closure.
+# These scalar config values are sent to PSOCK workers via clusterExport
+# (after cluster setup). We store them with a .cfg_ prefix to distinguish
+# them from the main config list and keep the worker function self-contained.
 .cfg_ami_bins   <- config$ami_n_bins
 .cfg_ami_lags   <- config$ami_n_lags
 .cfg_emb_dim    <- config$embedding_dim
@@ -284,6 +291,15 @@ CHECKPOINT_INTERVAL <- 50L   # Save CSV checkpoint every N files
 .cfg_sps        <- config$samples_per_step
 .cfg_lds_steps  <- lds_steps
 .cfg_aci_range  <- aci_stride_range
+
+# Export config parameters to cluster workers (constant across all files)
+if (use_parallel && !is.null(cl)) {
+  parallel::clusterExport(cl,
+    c(".cfg_ami_bins", ".cfg_ami_lags", ".cfg_emb_dim",
+      ".cfg_mean_period", ".cfg_div_length", ".cfg_sps",
+      ".cfg_lds_steps", ".cfg_aci_range"),
+    envir = environment())
+}
 
 
 # ==============================================================================
@@ -437,9 +453,10 @@ for (i in seq_along(csv_files)) {
     resampled_signals <- prep$resampled
 
     # Worker function: full nonlinear pipeline for one axis.
-    # References resampled_signals and .cfg_* variables from enclosing scope;
-    # these are serialized into the closure by parLapply and accessible via
-    # lexical scoping by lapply.
+    # On PSOCK workers, resampled_signals and .cfg_* variables are available
+    # via clusterExport (config params exported once at startup; signals
+    # exported before each parLapply call). For sequential lapply, these
+    # variables are accessible via lexical scoping in the same process.
     .run_axis <- function(ax) {
       ax_warn <- character(0)
 
@@ -503,6 +520,8 @@ for (i in seq_along(csv_files)) {
 
     # Dispatch: parallel (parLapply) or sequential (lapply)
     if (use_parallel) {
+      # Export this file's resampled signals to workers (changes per file)
+      parallel::clusterExport(cl, "resampled_signals", envir = environment())
       axis_results <- parallel::parLapply(cl, axes, .run_axis)
     } else {
       axis_results <- lapply(axes, .run_axis)
