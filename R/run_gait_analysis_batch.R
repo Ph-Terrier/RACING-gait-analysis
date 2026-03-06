@@ -18,6 +18,15 @@
 #   AMI  Rosenstein divergence  LDS/ACI fitting (on resampled) 
 #   results row
 #
+# Parallelization:
+#   The nonlinear analysis (AMI + Rosenstein + LDS/ACI fitting) is the
+#   computational bottleneck (~90% of per-file processing time). The four
+#   axes (AP, V, ML, norm) are independent and processed in parallel across
+#   cluster workers using the parallel package. A PSOCK cluster is created
+#   at startup (default: 4 workers, one per axis) and reused for all files.
+#   Falls back to sequential lapply when parallel setup fails or on
+#   single-core systems.
+#
 # Safety features:
 #   - All output paths resolved to absolute at startup
 #   - Incremental CSV checkpoint every N files (default: 50)
@@ -29,6 +38,7 @@
 #   Required:    openxlsx, gsignal (or signal as fallback)
 #   Recommended: RANN (10x speedup for nearest neighbor search)
 #   Optional:    data.table (faster CSV reading)
+#   Base R:      parallel (used for across-axis parallelization)
 #
 # Author: Philippe Terrier / HE-Arc
 # Date:   February 2026
@@ -157,6 +167,50 @@ cat(sprintf("    data.table: %s\n", ifelse(has_dt, "OK (fast CSV reading)", "not
 
 
 # ==============================================================================
+# 2b. PARALLEL CLUSTER SETUP (across-axis parallelization)
+# ==============================================================================
+# The four axes (x, y, z, norm) are independent for AMI, Rosenstein divergence,
+# and LDS/ACI fitting. We create a PSOCK cluster with up to 4 workers (one per
+# axis) and source the three required scripts on each worker. The cluster is
+# reused for all files in the batch. If setup fails, processing falls back to
+# sequential lapply with identical results.
+
+N_PARALLEL_WORKERS <- 4L   # one per axis (x, y, z, norm)
+
+cl <- NULL
+use_parallel <- FALSE
+
+tryCatch({
+  n_cores <- parallel::detectCores(logical = FALSE)
+  if (is.na(n_cores)) n_cores <- 1L
+  n_workers <- min(N_PARALLEL_WORKERS, max(1L, n_cores))
+
+  if (n_workers > 1L) {
+    cl <- parallel::makeCluster(n_workers)
+
+    # Source analysis scripts on each worker (project convention:
+    # use clusterEvalQ(source(...)) rather than clusterExport for functions)
+    parallel::clusterExport(cl, "script_dir", envir = environment())
+    parallel::clusterEvalQ(cl, {
+      source(file.path(script_dir, "ami.R"))
+      source(file.path(script_dir, "rosenstein_divergence.R"))
+      source(file.path(script_dir, "fit_divergence_exponents.R"))
+    })
+
+    use_parallel <- TRUE
+    cat(sprintf("\n  Parallel:     %d workers (PSOCK cluster, %d cores detected)\n",
+                n_workers, n_cores))
+  } else {
+    cat("\n  Parallel:     disabled (single core detected)\n")
+  }
+}, error = function(e) {
+  cat(sprintf("\n  Parallel:     disabled (%s)\n", e$message))
+  cl <<- NULL
+  use_parallel <<- FALSE
+})
+
+
+# ==============================================================================
 # 3. DISCOVER CSV FILES
 # ==============================================================================
 
@@ -217,6 +271,19 @@ batch_start <- Sys.time()
 
 # -- Checkpoint settings --
 CHECKPOINT_INTERVAL <- 50L   # Save CSV checkpoint every N files
+
+# -- Export analysis parameters to parallel workers --
+# These scalar values are captured in the worker function closure and sent
+# to each worker via parLapply serialization. We store them with a .cfg_
+# prefix in the batch script scope to keep them accessible to the closure.
+.cfg_ami_bins   <- config$ami_n_bins
+.cfg_ami_lags   <- config$ami_n_lags
+.cfg_emb_dim    <- config$embedding_dim
+.cfg_mean_period <- config$mean_period
+.cfg_div_length <- config$divergence_length
+.cfg_sps        <- config$samples_per_step
+.cfg_lds_steps  <- lds_steps
+.cfg_aci_range  <- aci_stride_range
 
 
 # ==============================================================================
@@ -355,73 +422,98 @@ for (i in seq_along(csv_files)) {
       list(step_regularity = NA_real_, stride_regularity = NA_real_)
     })
 
-    #  F. AMI (4 axes, on resampled signals) 
+    # ---- F+G. Nonlinear metrics: AMI + Rosenstein + LDS/ACI (4 axes) --------
+    # Each axis is independent: AMI determines the optimal embedding delay
+    # (tau), Rosenstein's algorithm computes the divergence curve, and linear
+    # regression extracts LDS and ACI. When a parallel cluster is available,
+    # the four axes run simultaneously (one per worker); otherwise they are
+    # processed sequentially with identical results.
+
     ami_vals <- setNames(integer(4), axes)
-
-    for (ax in axes) {
-      ami_result <- tryCatch({
-        ami(prep$resampled[[ax]],
-            n_bins = config$ami_n_bins,
-            n_lags = config$ami_n_lags)
-      }, error = function(e) {
-        file_warnings <<- c(file_warnings,
-          sprintf("AMI_%s: %s", ax, e$message))
-        list(optimal_lag = NA_integer_)
-      })
-
-      ami_vals[ax] <- ami_result$optimal_lag
-
-      # Fallback if no minimum found
-      if (is.na(ami_vals[ax])) {
-        ami_vals[ax] <- 10L
-        file_warnings <- c(file_warnings,
-          sprintf("AMI_%s: no minimum found, using tau=10", ax))
-      }
-    }
-
-    #  G. Rosenstein Divergence + Exponent Fitting (4 axes) 
     lds_vals <- setNames(numeric(4), axes)
     aci_vals <- setNames(numeric(4), axes)
 
-    for (ax in axes) {
+    # Capture per-file resampled signals for the worker closure
+    resampled_signals <- prep$resampled
 
-      # G1: Compute divergence curve
-      div_result <- tryCatch({
-        rosenstein_divergence(
-          x           = prep$resampled[[ax]],
-          m           = config$embedding_dim,
-          tau         = ami_vals[ax],      # axis-specific tau from AMI
-          mean_period = config$mean_period, # fixed from config (75)
-          max_iter    = config$divergence_length
-        )
-      }, error = function(e) {
-        file_warnings <<- c(file_warnings,
-          sprintf("Divergence_%s: %s", ax, e$message))
-        NULL
-      })
+    # Worker function: full nonlinear pipeline for one axis.
+    # References resampled_signals and .cfg_* variables from enclosing scope;
+    # these are serialized into the closure by parLapply and accessible via
+    # lexical scoping by lapply.
+    .run_axis <- function(ax) {
+      ax_warn <- character(0)
 
-      if (is.null(div_result)) {
-        lds_vals[ax] <- NA_real_
-        aci_vals[ax] <- NA_real_
-        next
+      # F: AMI -- optimal embedding delay
+      ami_result <- tryCatch(
+        ami(resampled_signals[[ax]],
+            n_bins = .cfg_ami_bins,
+            n_lags = .cfg_ami_lags),
+        error = function(e) {
+          ax_warn <<- c(ax_warn, sprintf("AMI_%s: %s", ax, e$message))
+          list(optimal_lag = NA_integer_)
+        }
+      )
+
+      tau <- ami_result$optimal_lag
+      if (is.na(tau)) {
+        tau <- 10L
+        ax_warn <- c(ax_warn,
+          sprintf("AMI_%s: no minimum found, using tau=10", ax))
       }
 
-      # G2: Fit LDS and ACI exponents
-      exponents <- tryCatch({
-        fit_divergence_exponents(
-          divergence       = div_result$divergence,
-          samples_per_step = config$samples_per_step,
-          lds_steps        = lds_steps,
-          aci_stride_range = aci_stride_range
-        )
-      }, error = function(e) {
-        file_warnings <<- c(file_warnings,
-          sprintf("Fit_%s: %s", ax, e$message))
-        list(LDS = NA_real_, ACI = NA_real_)
-      })
+      # G1: Rosenstein divergence curve
+      div_result <- tryCatch(
+        rosenstein_divergence(
+          x           = resampled_signals[[ax]],
+          m           = .cfg_emb_dim,
+          tau         = tau,
+          mean_period = .cfg_mean_period,
+          max_iter    = .cfg_div_length
+        ),
+        error = function(e) {
+          ax_warn <<- c(ax_warn, sprintf("Divergence_%s: %s", ax, e$message))
+          NULL
+        }
+      )
 
-      lds_vals[ax] <- exponents$LDS
-      aci_vals[ax] <- exponents$ACI
+      lds_val <- NA_real_
+      aci_val <- NA_real_
+
+      if (!is.null(div_result)) {
+        # G2: Fit LDS and ACI exponents
+        exponents <- tryCatch(
+          fit_divergence_exponents(
+            divergence       = div_result$divergence,
+            samples_per_step = .cfg_sps,
+            lds_steps        = .cfg_lds_steps,
+            aci_stride_range = .cfg_aci_range
+          ),
+          error = function(e) {
+            ax_warn <<- c(ax_warn, sprintf("Fit_%s: %s", ax, e$message))
+            list(LDS = NA_real_, ACI = NA_real_)
+          }
+        )
+        lds_val <- exponents$LDS
+        aci_val <- exponents$ACI
+      }
+
+      list(axis = ax, ami = tau, lds = lds_val, aci = aci_val,
+           warnings = ax_warn)
+    }
+
+    # Dispatch: parallel (parLapply) or sequential (lapply)
+    if (use_parallel) {
+      axis_results <- parallel::parLapply(cl, axes, .run_axis)
+    } else {
+      axis_results <- lapply(axes, .run_axis)
+    }
+
+    # Collect results from all axes
+    for (res in axis_results) {
+      ami_vals[res$axis] <- res$ami
+      lds_vals[res$axis] <- res$lds
+      aci_vals[res$axis] <- res$aci
+      file_warnings <- c(file_warnings, res$warnings)
     }
 
     #  H. Optional: Export divergence curves 
@@ -526,7 +618,17 @@ for (i in seq_along(csv_files)) {
 
 
 # ==============================================================================
-# 7. WRITE OUTPUT EXCEL FILE
+# 7. SHUTDOWN PARALLEL CLUSTER
+# ==============================================================================
+
+if (!is.null(cl)) {
+  parallel::stopCluster(cl)
+  cl <- NULL
+}
+
+
+# ==============================================================================
+# 8. WRITE OUTPUT EXCEL FILE
 # ==============================================================================
 
 cat("\n\n")
@@ -542,7 +644,7 @@ write_racing_results(results, config, output_file)
 
 
 # ==============================================================================
-# 8. BATCH SUMMARY
+# 9. BATCH SUMMARY
 # ==============================================================================
 
 batch_elapsed <- as.numeric(difftime(Sys.time(), batch_start, units = "secs"))
@@ -560,6 +662,10 @@ cat(sprintf("  Failed:          %d\n", n_failed))
 cat(sprintf("  Total time:      %.1f seconds (%.1f s/file)\n",
             batch_elapsed,
             batch_elapsed / length(csv_files)))
+cat(sprintf("  Parallelization: %s\n",
+            ifelse(use_parallel,
+                   sprintf("ON (%d workers, across axes)", N_PARALLEL_WORKERS),
+                   "OFF (sequential)")))
 cat(sprintf("  Output:          %s\n", output_file_abs))
 
 # Verify output exists
