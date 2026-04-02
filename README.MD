@@ -233,6 +233,13 @@ To exactly reproduce the ACIER study results:
 A reproducible CodeOcean capsule demonstrating end-to-end processing of the
 outdoor older adult condition is available at: [NOT AVAILABLE YET]
 
+### Dependency versions
+
+RACING uses stable CRAN package APIs that are robust to routine updates.
+See [VERSIONS.md](VERSIONS.md) for the tested environment, version
+sensitivity notes, and the full session snapshot. For exact version pinning,
+use the CodeOcean capsule.
+
 ---
 
 ## Citation
