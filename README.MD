@@ -27,8 +27,8 @@ the international research community without requiring a MATLAB license.
 |--------|-------------|-------------------|
 | **LDS** | Local Dynamic Stability (short-term, 0-0.5 strides) | Gait stability, fall risk |
 | **ACI** | Attractor Complexity Index (long-term, 5-12 strides) | Motor complexity, cognitive engagement |
-| **Step/Stride regularity** | ACF-based regularity indices | Gait rhythmicity |
-| **Step frequency** | FFT-based cadence detection | Walking speed proxy |
+| **Step/Stride regularity** | ACF-based regularity indices | Gait regularity |
+| **Step frequency** | FFT-based cadence detection | Walking pace |
 | **RMS ratio** | Mediolateral/norm acceleration ratio | Trunk stability |
 
 ### Reference dataset
@@ -264,6 +264,7 @@ under a BSD license.
 ## Contact and Support
 
 Philippe Terrier -- HE-Arc Sante, Neuchatel, Switzerland
+Philippe.Terrier@he-arc.ch
 
 For bug reports and feature requests, please open an issue on this repository:
 [https://github.com/Ph-Terrier/RACING-gait-analysis/issues](https://github.com/Ph-Terrier/RACING-gait-analysis/issues)
