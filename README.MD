@@ -276,6 +276,5 @@ For bug reports and feature requests, please open an issue on this repository:
 RACING was developed as part of the ORD 2025 grant (Open Research Data, HES-SO)
 at HE-Arc Sante Neuchatel. The project objective is to make validated nonlinear gait
 analysis methods freely accessible to international researchers following FAIR principles,
-enabling reproducibility of the ACIER findings and facilitating new clinical research
-
+enabling reproducibility of the ACIER findings and facilitating new clinical research 
 on gait stability and fall risk in older adults.
