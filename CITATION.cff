@@ -1,0 +1,26 @@
+cff-version: 1.2.0
+message: "If you use RACING, please cite this software (and, where relevant, the underlying ACIER study referenced in the README)."
+title: "RACING: R-based Attractor Complexity INdex for Gait"
+abstract: "Open R implementation of validated linear and nonlinear gait-analysis algorithms for triaxial lower-back accelerometer data, ported from the ACIER MATLAB code. Computes local dynamic stability (LDS), the attractor complexity index (ACI), step/stride regularity, step frequency, and RMS measures, following FAIR principles."
+type: software
+authors:
+  - family-names: Terrier
+    given-names: Philippe
+    orcid: "https://orcid.org/0000-0002-3693-4505"
+    affiliation: "HE-Arc Sante, HES-SO University of Applied Sciences and Arts Western Switzerland, Neuchatel, Switzerland"
+version: "1.0.2"
+date-released: "2026-06-04"
+license: MIT
+repository-code: "https://github.com/Ph-Terrier/RACING-gait-analysis"
+doi: "10.5281/zenodo.18801995"
+keywords:
+  - gait analysis
+  - accelerometry
+  - nonlinear dynamics
+  - local dynamic stability
+  - attractor complexity index
+  - gait variability
+  - fall risk
+  - R
+  - FAIR
+  - biomechanics
