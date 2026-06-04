@@ -35,7 +35,7 @@
 #   - Smith, J.O. (2011). Spectral Audio Signal Processing. W3K Publishing.
 #     Chapter on "Quadratic Interpolation of Spectral Peaks"
 #   - Gasior, M. & Gonzalez, J.L. (2004). Improving FFT frequency
-#     measurement resolution by parabolic and Gaussian interpolation.
+#     measurement resolution by parabolic and Gaussian spectrum interpolation.
 #     AIP Conference Proceedings, 732(1), 276-285.
 #
 # =============================================================================

@@ -379,8 +379,9 @@ tilt_correction_batch <- function(data, col_ap, col_v, col_ml, ...) {
 #'
 #' @param corrected_data Output from `tilt_correction()` with
 #'   `return_diagnostics = TRUE`.
-#' @param mean_tolerance Maximum acceptable mean acceleration (in g) for
-#'   quality check. Default is 0.01g.
+#' @param mean_tolerance_ap Max acceptable AP mean acceleration (g). Default 0.05.
+#' @param mean_tolerance_v  Max acceptable V mean acceleration (g). Default 0.10.
+#' @param mean_tolerance_ml Max acceptable ML mean acceleration (g). Default 0.05.
 #' @param max_tilt_deg Maximum acceptable tilt angle (in degrees) for
 #'   warning. Default is 30 deg.
 #'

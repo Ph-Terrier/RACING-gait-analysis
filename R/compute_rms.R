@@ -34,7 +34,7 @@
 #'   Moe-Nilssen, R. (1998). A new method for evaluating motor control in gait
 #'   under real-life environmental conditions. Part 2: Gait analysis.
 #'   Clinical Biomechanics, 13(4-5), 328-335.
-#'   https://doi.org/10.1016/S0268-0033(98)00091-6
+#'   https://doi.org/10.1016/S0268-0033(98)00090-4
 #'
 #' RMS ratio (mediolateral / vector norm):
 #'   Sekine, M., Tamura, T., Yoshida, M., Suda, Y., Kimura, Y., Miyoshi, H.,

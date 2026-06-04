@@ -173,7 +173,7 @@ xcorr_unbiased <- function(x, max_lag, normalize = TRUE) {
 #' @param sampling_freq Sampling frequency in Hz (default: 256)
 #' @param max_lag_seconds Maximum lag for ACF computation in seconds (default: 2.0)
 #' @param peak_order Order for peak detection in samples (default: 60).
-#'                   At 256 Hz, 60 samples ≈ 234 ms, preventing false peaks
+#'                   At 256 Hz, 60 samples ~= 234 ms, preventing false peaks
 #'                   within the same gait event.
 #' @param apply_fisher If TRUE (default), apply Fisher z-transform (atanh) to
 #'                     regularity values for statistical normalization

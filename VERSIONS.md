@@ -40,7 +40,7 @@ reproducibility.
 
 ## Exact reproducibility
 
-The CodeOcean capsule (ID 9058247) pins all package versions in its
+The CodeOcean capsule (DOI 10.24433/CO.4368981.v1, capsule 5177613) pins all package versions in its
 environment and guarantees bitwise-identical results. Use the capsule when
 exact reproduction of the published results is required.
 

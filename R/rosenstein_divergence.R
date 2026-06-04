@@ -191,8 +191,12 @@ compute_divergence <- function(Y, nearest_pos, max_iter) {
 #' 
 #' @param x Numeric vector - the time series
 #' @return Integer - estimated mean period in samples
-#' @note For gait analysis, this typically returns ~150 samples (one stride)
-#'       at 256 Hz sampling frequency.
+#' @note Returns the lag of the first zero-crossing of the autocorrelation
+#'       function (or the first ACF local minimum as a fallback). For
+#'       quasi-periodic gait signals this is roughly a quarter of the dominant
+#'       period (tens of samples at 256 Hz), NOT a full stride. This is only a
+#'       fallback: the RACING pipeline always passes mean_period explicitly
+#'       (= 75, one step), so this estimator is not exercised there.
 estimate_mean_period <- function(x) {
   N <- length(x)
   max_lag <- min(N - 1, 500)

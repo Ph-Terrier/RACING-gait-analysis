@@ -4,7 +4,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![R >= 4.0](https://img.shields.io/badge/R-%3E%3D%204.0-blue.svg)](https://cran.r-project.org/)
-[![CodeOcean](https://img.shields.io/badge/CodeOcean-Reproducible%20Capsule-blue)](https://codeocean.com/capsule/9058247)
+[![CodeOcean](https://img.shields.io/badge/CodeOcean-Reproducible%20Capsule-blue)](https://doi.org/10.24433/CO.4368981.v1)
 [![Zenodo Dataset](https://img.shields.io/badge/Data-Zenodo%2010.5281%2Fzenodo.10148824-blue)](https://doi.org/10.5281/zenodo.10148824)
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.18801995.svg)](https://doi.org/10.5281/zenodo.18801995)
 
@@ -95,7 +95,7 @@ cells in the `1_Configuration` sheet:
 - `data_folder`: path to your CSV files
 - `sampling_freq`: your accelerometer sampling rate (Hz)
 - `col_ap`, `col_v`, `col_ml`: column indices for each axis (1-based)
-- `target_steps`: steps to extract (250 for lab walks)
+- `target_steps`: steps to extract (250 for indoor lab walks, 500 for outdoor; the bundled template ships 500)
 - `output_folder` and `study_name`: where to save results
 
 **Step 2 -- Run the analysis**
@@ -159,8 +159,8 @@ specified in the configuration file -- no renaming of files is needed.
 Units can be `g` or `m/s2` (set in configuration). The sensor should be placed at
 the lower back (L4-L5 level), rigidly attached.
 
-**Minimum signal length:** approximately 350 steps recommended (250 steps extracted
-after truncation + buffer for step detection).
+**Minimum signal length:** about `target_steps` + 100 steps recommended (e.g. ~350 steps
+for a 250-step extraction, ~600 for 500), leaving a buffer after truncation for step detection.
 
 ---
 
@@ -196,8 +196,8 @@ orchestrator (Layer 3) sources all scripts automatically.
 ### Processing pipeline (per participant)
 ```
 CSV import --> Tilt correction --> Step frequency (FFT)
-           --> Signal truncation (250 steps)
-           --> Signal resampling (18750 samples = 250 steps x 75 samples/step)
+           --> Signal truncation (target_steps; 250 indoor / 500 outdoor)
+           --> Signal resampling (target_steps x 75 samples/step; e.g. 18750 or 37500)
            --> RMS + ACF regularity (on truncated signal)
            --> AMI optimal delay (on resampled signal, 4 axes in parallel)
            --> Rosenstein divergence + LDS/ACI (on resampled signal, 4 axes)
@@ -213,7 +213,7 @@ and should not be changed without understanding their scientific basis:
 
 | Parameter (config name) | Default value | Rationale |
 |-------------------------|---------------|-----------|
-| `target_steps` | 250 | Standardized gait epoch length |
+| `target_steps` | 250 (indoor) / 500 (outdoor) | Gait epoch length; bundled template ships 500 (SoftwareX / CodeOcean) |
 | `samples_per_step` | 75 | 256 Hz / ~3.4 steps/s; determines resampled length |
 | `embedding_dim` | 5 | Phase space dimensionality for Rosenstein algorithm |
 | `lds_range_end` | 0.5 strides | Short-term divergence window (= 1 step = 75 samples) |
@@ -224,14 +224,26 @@ and should not be changed without understanding their scientific basis:
 
 ## Reproducibility
 
-To exactly reproduce the ACIER study results:
+The bundled `config/RACING_config_template.xlsx` is pre-set to the ACIER **Outdoor**
+condition (`target_steps = 500`), which reproduces the RACING / SoftwareX results and the
+CodeOcean capsule below. To reproduce the original ACIER **Indoor** validation
+(Piergiovanni & Terrier 2024, *Sensors* and *Scientific Reports*, originally run with the
+MATLAB scripts), set `target_steps = 250`. The choice of 250 vs 500 only changes the
+analysed epoch length; it does not change any metric definition.
+
+| Artifact | Scripts | Condition | `target_steps` |
+|----------|---------|-----------|----------------|
+| ACIER validation (*Sensors*, *Sci Rep*) | MATLAB | Indoor | 250 |
+| RACING (SoftwareX) + CodeOcean capsule | R | Outdoor | 500 |
+
+To reproduce:
 
 1. Download the ACIER dataset from Zenodo: [https://doi.org/10.5281/zenodo.10148824](https://doi.org/10.5281/zenodo.10148824)
-2. Use the pre-configured `config/RACING_config_template.xlsx` (set `sampling_freq = 256`)
-3. Run the batch pipeline on the young and / or older group
+2. Use the bundled `config/RACING_config_template.xlsx` (already set for Outdoor / 500 at 256 Hz; set `target_steps = 250` for the Indoor validation)
+3. Run the batch pipeline
 
-A reproducible CodeOcean capsule demonstrating end-to-end processing of the
-outdoor older adult condition is available at: [NOT AVAILABLE YET]
+A reproducible CodeOcean capsule demonstrating end-to-end processing of the outdoor
+older-adult condition is available at: [https://doi.org/10.24433/CO.4368981.v1](https://doi.org/10.24433/CO.4368981.v1)
 
 ### Dependency versions
 

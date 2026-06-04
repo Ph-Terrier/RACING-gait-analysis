@@ -56,7 +56,7 @@
 #' - Uses data.table::fread if available (fast, robust encoding handling)
 #' - Falls back to read.csv if data.table not installed
 #' - Validates column indices before extraction
-#' - Converts m/sÂ² to g automatically (dividing by 9.81)
+#' - Converts m/s2 to g automatically (dividing by 9.81)
 #' - Handles missing values (reports count)
 #' - Checks for non-numeric data in acceleration columns
 #'
@@ -182,7 +182,7 @@ import_csv_lowback <- function(file_path, config, verbose = FALSE) {
   }
 
   if (verbose) {
-    message(sprintf("  Read %d rows Ã— %d columns", 
+    message(sprintf("  Read %d rows x %d columns", 
                    nrow(raw_data), ncol(raw_data)))
   }
   
@@ -276,7 +276,7 @@ import_csv_lowback <- function(file_path, config, verbose = FALSE) {
   
   if (config$accel_units == "m/s2") {
     
-    if (verbose) message("  Converting m/sÂ² to g (Ã· 9.81)")
+    if (verbose) message("  Converting m/s2 to g (/ 9.81)")
     
     data$ap <- data$ap / 9.81
     data$v  <- data$v  / 9.81
@@ -348,13 +348,13 @@ import_csv_lowback <- function(file_path, config, verbose = FALSE) {
 check_csv_structure <- function(file_path, config, n_preview = 5) {
   
   cat("\n")
-  cat("â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•\n")
+  cat("===============================================================\n")
   cat("CSV STRUCTURE CHECK:", basename(file_path), "\n")
-  cat("â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•\n\n")
+  cat("===============================================================\n\n")
   
   # File info
   if (!file.exists(file_path)) {
-    cat("âœ— ERROR: File not found!\n")
+    cat("[X] ERROR: File not found!\n")
     return(invisible(NULL))
   }
   
@@ -364,12 +364,12 @@ check_csv_structure <- function(file_path, config, n_preview = 5) {
   
   # Preview first few lines
   cat("First", n_preview, "lines (raw):\n")
-  cat("â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€\n")
+  cat("---------------------------------------------------------------\n")
   first_lines <- readLines(file_path, n = n_preview, warn = FALSE)
   for (i in seq_along(first_lines)) {
     cat(sprintf("%2d: %s\n", i, first_lines[i]))
   }
-  cat("â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€\n\n")
+  cat("---------------------------------------------------------------\n\n")
   
   # Try to read with current config
   cat("Attempting import with current config:\n")
@@ -383,7 +383,7 @@ check_csv_structure <- function(file_path, config, n_preview = 5) {
     
     data <- import_csv_lowback(file_path, config, verbose = FALSE)
     
-    cat("âœ“ Import successful!\n\n")
+    cat("[OK] Import successful!\n\n")
     cat("Data summary:\n")
     cat(sprintf("  Samples:   %d\n", nrow(data)))
     cat(sprintf("  Duration:  %.1f seconds\n", 
@@ -399,19 +399,19 @@ check_csv_structure <- function(file_path, config, n_preview = 5) {
     cat("\nData quality checks:\n")
     na_count <- sum(is.na(data$ap) | is.na(data$v) | is.na(data$ml))
     if (na_count > 0) {
-      cat(sprintf("  âš  Missing values: %d (%.1f%%)\n", 
+      cat(sprintf("  [!] Missing values: %d (%.1f%%)\n", 
                  na_count, 100*na_count/nrow(data)))
     } else {
-      cat("  âœ“ No missing values\n")
+      cat("  [OK] No missing values\n")
     }
     
     # Check for extreme values (>20g suggests wrong units or sensor saturation)
     extreme <- abs(data$ap) > 20 | abs(data$v) > 20 | abs(data$ml) > 20
     if (any(extreme, na.rm=TRUE)) {
-      cat(sprintf("  âš  Extreme values: %d samples >20g (check units?)\n",
+      cat(sprintf("  [!] Extreme values: %d samples >20g (check units?)\n",
                  sum(extreme, na.rm=TRUE)))
     } else {
-      cat("  âœ“ All values in plausible range (<20g)\n")
+      cat("  [OK] All values in plausible range (<20g)\n")
     }
     
     return(invisible(list(
@@ -421,7 +421,7 @@ check_csv_structure <- function(file_path, config, n_preview = 5) {
     )))
     
   }, error = function(e) {
-    cat("âœ— Import failed!\n")
+    cat("[X] Import failed!\n")
     cat("Error:", conditionMessage(e), "\n\n")
     
     cat("Troubleshooting suggestions:\n")
@@ -436,7 +436,7 @@ check_csv_structure <- function(file_path, config, n_preview = 5) {
     )))
   })
   
-  cat("\nâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•\n\n")
+  cat("\n===============================================================\n\n")
   
   return(result)
 }

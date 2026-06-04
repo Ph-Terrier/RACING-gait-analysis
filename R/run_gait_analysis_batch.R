@@ -390,6 +390,7 @@ for (i in seq_along(csv_files)) {
       auto_orient          = config$auto_orient,
       freq_range           = c(config$sf_freq_min, config$sf_freq_max),
       resampling_method    = "direct",
+      verbose              = FALSE,
       log_file             = resample_log_path
     )
 

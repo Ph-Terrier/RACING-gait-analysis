@@ -493,7 +493,7 @@ resample_log <- function(log_file, fmt, ...) {
 #' 
 #' @param original_length Integer. Length of the original signal.
 #' @param target_length Integer. Desired length after resampling.
-#' @param threshold Integer. Maximum allowed filter phases (default: 100).
+#' @param threshold Integer. Maximum allowed filter phases (default: 50000).
 #' @return A list with ratio diagnostics.
 #' @export
 check_resampling_ratio <- function(original_length, target_length, threshold = 50000) {

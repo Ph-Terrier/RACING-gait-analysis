@@ -19,7 +19,9 @@
 #   Copyright 2004-2005 by Durga Lal Shrestha
 #
 # Reference: Fraser, A.M. & Swinney, H.L. (1986). Independent coordinates
-#            for strange attractors from mutual information. Physical Review A.
+#            for strange attractors from mutual information.
+#            Physical Review A, 33(2), 1134-1140.
+#            https://doi.org/10.1103/PhysRevA.33.1134
 #
 # Typical ACIER pipeline usage: ami(signal, n_bins = 64, n_lags = 100)
 #
@@ -478,7 +480,7 @@ ami_plot <- function(lags, ami_values, corr_values) {
     points(lag_value, ami_values[opt_lag], pch = 19, col = "red", cex = 1.5)
     abline(v = lag_value, lty = 2, col = "gray")
     text(lag_value, ami_values[opt_lag], 
-         labels = sprintf("tau = %d", opt_lag),
+         labels = sprintf("tau = %d (lag %d)", opt_lag, lag_value),
          pos = 4, col = "red")
   }
   
